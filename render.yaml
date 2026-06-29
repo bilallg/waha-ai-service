@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: waha-ai-service
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn ai_service:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: WAHA_AI_API_KEY
+        sync: false
