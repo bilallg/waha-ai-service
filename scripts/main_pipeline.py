@@ -16,7 +16,7 @@ try:
     from .image_search import search_and_download
     from .improve_images import create_product_video, enhance_image, improve_images_batch
     from .export_marketplace import export_marketplace_package
-    from .product_description_generator import save_product_data
+    from .product_description_generator import generate_clean_product_description, save_product_data
     from .product_lookup import lookup_product
     from .scan_qr_code import scan_code
     from .barcode_decoder import decode_barcode
@@ -27,7 +27,7 @@ except ImportError:
     from image_search import search_and_download
     from improve_images import create_product_video, enhance_image, improve_images_batch
     from export_marketplace import export_marketplace_package
-    from product_description_generator import save_product_data
+    from product_description_generator import generate_clean_product_description, save_product_data
     from product_lookup import lookup_product
     from scan_qr_code import scan_code
     from barcode_decoder import decode_barcode
@@ -131,6 +131,26 @@ def _save_image_file_for_processing(image_file: Any) -> Path:
         data = data.encode("utf-8")
     output_path.write_bytes(data)
     return output_path
+
+
+def _normalize_serpapi_description(
+    serpapi_result: dict[str, Any],
+    barcode: str,
+    barcode_type: str = "",
+) -> dict[str, Any]:
+    original_description = str(serpapi_result.get("product_description") or "").strip()
+    clean_description = generate_clean_product_description(
+        barcode=barcode,
+        barcode_type=barcode_type,
+        product_title=serpapi_result.get("product_title", ""),
+        old_description=original_description,
+        links=serpapi_result.get("links") or [],
+        source=serpapi_result.get("source", ""),
+    )
+    normalized = {**serpapi_result, "product_description": clean_description}
+    if original_description:
+        normalized["original_description"] = original_description
+    return normalized
 
 
 def process_barcode_image(image_file: Any) -> dict[str, Any]:
@@ -243,14 +263,22 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         }
     if serpapi_result.get("warning"):
         warnings.append(str(serpapi_result["warning"]))
+    serpapi_result = _normalize_serpapi_description(
+        serpapi_result=serpapi_result,
+        barcode=barcode,
+        barcode_type=barcode_metadata.get("barcode_type", ""),
+    )
 
     return {
+        **serpapi_result,
         "status": "success",
+        "success": True,
         "mode": "YOLOv8 + pyzbar + SerpAPI",
         "barcode": barcode,
+        "barcode_type": barcode_metadata.get("barcode_type", ""),
+        "original_description": serpapi_result.get("original_description", ""),
         "warnings": warnings,
         "serpapi_result": serpapi_result,
-        **serpapi_result,
         **barcode_metadata,
     }
 
@@ -436,6 +464,11 @@ def run_pipeline(
         }
     if serpapi_result.get("warning"):
         warnings.append(str(serpapi_result["warning"]))
+    serpapi_result = _normalize_serpapi_description(
+        serpapi_result=serpapi_result,
+        barcode=barcode,
+        barcode_type=barcode_metadata.get("barcode_type", ""),
+    )
 
     _notify(progress_callback, "Identification produit via OpenFoodFacts...")
     try:
@@ -544,6 +577,12 @@ def run_pipeline(
     _notify(progress_callback, "Generation de la fiche produit...")
     export_dir = EXPORTS_DIR / product_folder
     product_data_path = export_dir / "product_data.json"
+    if product_lookup.get("source") == "fallback" and serpapi_result.get("product_title"):
+        product_lookup["title"] = serpapi_result["product_title"]
+    product_lookup["description"] = serpapi_result.get("product_description") or product_lookup.get("description", "")
+    product_lookup["original_description"] = serpapi_result.get("original_description", "")
+    product_lookup["links"] = serpapi_result.get("links") or []
+    product_lookup["barcode_type"] = barcode_metadata.get("barcode_type", "")
     product_data = save_product_data(product_lookup, product_data_path)
     product_data.update(
         {

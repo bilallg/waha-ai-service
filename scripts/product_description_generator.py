@@ -6,9 +6,144 @@ from pathlib import Path
 from typing import Any
 
 
+FALLBACK_DESCRIPTION = (
+    "This product was identified using its barcode. Additional product details can be completed manually by the seller."
+)
+
+
 def _clean(value: object, fallback: str = "") -> str:
     text = "" if value is None else str(value).strip()
     return text or fallback
+
+
+def _clean_sentence_text(value: object) -> str:
+    text = _clean(value)
+    if not text:
+        return ""
+
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(?:click here|read more(?:\s+at)?|see more|visit site|shop now|buy now)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b(?:google search|google images|image result|search result|serpapi)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -|:;,.")
+    text = re.sub(r"\b(\w+)(?:\s+\1\b)+", r"\1", text, flags=re.IGNORECASE)
+    return text
+
+
+def _split_sentences(text: str) -> list[str]:
+    if not text:
+        return []
+    raw_sentences = re.split(r"(?<=[.!?])\s+", text)
+    sentences: list[str] = []
+    seen: set[str] = set()
+    for sentence in raw_sentences:
+        cleaned = _clean_sentence_text(sentence).strip()
+        if not cleaned or len(cleaned) < 18:
+            continue
+        if not re.search(r"[A-Za-z]{3,}", cleaned):
+            continue
+        if re.search(
+            r"\b(?:might|could|probably|uncertain|verify before validation|validation|a verifier|verifier|vérifier|pourrait|"
+            r"produit detecte|produit détecté|resultats web|résultats web|meilleur resultat web|"
+            r"meilleur résultat web|description generee automatiquement|description générée automatiquement)\b",
+            cleaned,
+            re.IGNORECASE,
+        ):
+            continue
+        if cleaned[-1] not in ".!?":
+            cleaned = f"{cleaned}."
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        sentences.append(cleaned)
+        if len(sentences) >= 2:
+            break
+    return sentences
+
+
+def _has_specific_title(title: str, barcode: str) -> bool:
+    cleaned = _clean_sentence_text(title)
+    if not cleaned or cleaned.lower() in {"product", "produit"}:
+        return False
+    if barcode and cleaned in {barcode, f"Produit {barcode}", f"Product {barcode}", f"Produit détecté - {barcode}"}:
+        return False
+    return bool(re.search(r"[A-Za-z]{3,}", cleaned))
+
+
+def generate_clean_product_description(
+    barcode: str = "",
+    barcode_type: str = "",
+    product_title: str = "",
+    old_description: str = "",
+    links: list[dict[str, Any]] | None = None,
+    source: str = "",
+) -> str:
+    """Create a concise e-commerce description from barcode enrichment data."""
+    cleaned_barcode = _clean(barcode)
+    cleaned_type = _clean(barcode_type)
+    cleaned_title = _clean_sentence_text(product_title)
+    old_sentences = _split_sentences(old_description)
+
+    if not _has_specific_title(cleaned_title, cleaned_barcode) and not old_sentences:
+        return FALLBACK_DESCRIPTION
+
+    sentences: list[str] = []
+    if _has_specific_title(cleaned_title, cleaned_barcode):
+        identifier = f" with {cleaned_type} barcode {cleaned_barcode}" if cleaned_type and cleaned_barcode else ""
+        sentences.append(f"{cleaned_title} is a product identified{identifier} from available product data.")
+
+    title_key = cleaned_title.lower().strip(" .!?")
+    sentences.extend(
+        sentence
+        for sentence in old_sentences
+        if sentence.lower().strip(" .!?") != title_key
+    )
+
+    if len(sentences) < 2:
+        if links:
+            sentences.append("The listing is based on barcode lookup results and should be reviewed against the physical product before publication.")
+        else:
+            sentences.append("Additional product details can be completed manually by the seller before publication.")
+
+    cleaned_sentences: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        cleaned = _clean_sentence_text(sentence)
+        if not cleaned:
+            continue
+        if cleaned[-1] not in ".!?":
+            cleaned = f"{cleaned}."
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned_sentences.append(cleaned)
+        if len(cleaned_sentences) >= 4:
+            break
+
+    if not cleaned_sentences:
+        return FALLBACK_DESCRIPTION
+
+    description = " ".join(cleaned_sentences[:4])
+    if len(description) > 700:
+        description = description[:697].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
+    return description or FALLBACK_DESCRIPTION
+
+
+def generate_clean_product_description_from_payload(payload: dict[str, Any]) -> str:
+    return generate_clean_product_description(
+        barcode=_clean(payload.get("barcode")),
+        barcode_type=_clean(payload.get("barcode_type")),
+        product_title=_clean(payload.get("product_title") or payload.get("title")),
+        old_description=_clean(payload.get("old_description") or payload.get("original_description") or payload.get("description")),
+        links=payload.get("links") or [],
+        source=_clean(payload.get("source")),
+    )
 
 
 def _slug_words(*values: str) -> list[str]:
@@ -42,6 +177,14 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
     category = _clean(product.get("category"), "Categorie provisoire")
     quantity = _clean(product.get("quantity"))
     source_description = _clean(product.get("description"), "Description provisoire a valider par le vendeur")
+    clean_description = generate_clean_product_description(
+        barcode=barcode,
+        barcode_type=_clean(product.get("barcode_type")),
+        product_title=raw_title,
+        old_description=source_description,
+        links=product.get("links") or [],
+        source=_clean(product.get("source")),
+    )
 
     title_parts = [brand, raw_title, quantity]
     seo_title = " ".join(part for part in title_parts if part)
@@ -56,7 +199,7 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
         short_description = f"{seo_title}: fiche provisoire a completer et valider par le vendeur."
 
     long_description = (
-        f"{source_description}. Cette fiche a ete generee automatiquement a partir du code-barres {barcode}. "
+        f"{clean_description} Cette fiche a ete generee automatiquement a partir du code-barres {barcode}. "
         "Les visuels finaux sont prepares sur fond blanc pour une presentation marketplace propre. "
         "Le vendeur doit verifier le prix, le stock, les variantes et les informations legales avant publication."
     )
@@ -83,6 +226,8 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
         "brand": brand,
         "category": category,
         "source": _clean(product.get("source"), "fallback"),
+        "product_description": clean_description,
+        "original_description": source_description,
         "seo_title": seo_title,
         "short_description": short_description,
         "long_description": long_description,

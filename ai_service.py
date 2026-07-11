@@ -76,9 +76,10 @@ def _shape_response(result: dict) -> dict:
         "barcode_type": result.get("barcode_type", ""),
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
+        "original_description": result.get("original_description", ""),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
-        "source": "YOLOv8 + ZBar + SerpAPI",
+        "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI",
         "message": message,
     }
 
@@ -119,6 +120,7 @@ async def detect_barcode(
                 "barcode_type": "",
                 "product_title": "",
                 "product_description": "",
+                "original_description": "",
                 "images": [],
                 "links": [],
                 "source": "YOLOv8 + ZBar + SerpAPI",
