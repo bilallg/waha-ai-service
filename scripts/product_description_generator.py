@@ -28,6 +28,12 @@ def _clean_sentence_text(value: object) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    text = re.sub(
+        r"(?i)\b(?:price|prix|cost|sale)\s*:?\s*(?:[$€£]|mad|dh|dhs|usd|eur|gbp)?\s*\d*(?:[.,]\d{1,2})?",
+        " ",
+        text,
+    )
+    text = re.sub(r"(?i)(?:[$€£]\s*\d+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:mad|dh|dhs|usd|eur|gbp))", " ", text)
     text = re.sub(r"\b(?:google search|google images|image result|search result|serpapi)\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip(" -|:;,.")
     text = re.sub(r"\b(\w+)(?:\s+\1\b)+", r"\1", text, flags=re.IGNORECASE)
@@ -98,17 +104,16 @@ def generate_clean_product_description(
         sentences.append(f"{cleaned_title} is a product identified{identifier} from available product data.")
 
     title_key = cleaned_title.lower().strip(" .!?")
-    sentences.extend(
+    related_old_sentences = (
         sentence
         for sentence in old_sentences
         if sentence.lower().strip(" .!?") != title_key
+        and _is_product_related_sentence(sentence, cleaned_title)
     )
+    sentences.extend(related_old_sentences)
 
     if len(sentences) < 2:
-        if links:
-            sentences.append("The listing is based on barcode lookup results and should be reviewed against the physical product before publication.")
-        else:
-            sentences.append("Additional product details can be completed manually by the seller before publication.")
+        sentences.append("It can be listed with seller-reviewed packaging details in the platform.")
 
     cleaned_sentences: list[str] = []
     seen: set[str] = set()
@@ -155,28 +160,44 @@ def _slug_words(*values: str) -> list[str]:
     return words
 
 
-def _marketplace_category(category: str, title: str) -> str:
-    text = f"{category} {title}".lower()
-    if any(word in text for word in ["boisson", "drink", "eau", "jus", "soda"]):
-        return "Epicerie > Boissons"
-    if any(word in text for word in ["chocolat", "biscuit", "snack", "bonbon"]):
-        return "Epicerie > Snacks et confiserie"
-    if any(word in text for word in ["savon", "shampoo", "gel", "douche", "beaute"]):
-        return "Beaute et hygiene"
-    if any(word in text for word in ["electronique", "phone", "chargeur", "cable"]):
-        return "Electronique"
-    if any(word in text for word in ["vetement", "chaussure", "sac", "mode"]):
-        return "Mode"
-    return category or "Categorie provisoire"
+def _title_tokens(title: str) -> set[str]:
+    return {
+        word
+        for word in re.findall(r"[A-Za-zÀ-ÿ0-9]+", title.lower())
+        if len(word) >= 3
+    }
+
+
+def _is_product_related_sentence(sentence: str, title: str) -> bool:
+    title_words = _title_tokens(title)
+    if not title_words:
+        return False
+    sentence_words = _title_tokens(sentence)
+    if not sentence_words.intersection(title_words):
+        return False
+    unrelated_markers = [
+        "search",
+        "result",
+        "image",
+        "review",
+        "blog",
+        "news",
+        "compare",
+        "coupon",
+        "price",
+        "shipping",
+        "delivery",
+    ]
+    lowered = sentence.lower()
+    return not any(marker in lowered for marker in unrelated_markers)
 
 
 def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
     barcode = _clean(product.get("barcode"), "unknown")
     raw_title = _clean(product.get("title"), f"Produit {barcode}")
     brand = _clean(product.get("brand"))
-    category = _clean(product.get("category"), "Categorie provisoire")
     quantity = _clean(product.get("quantity"))
-    source_description = _clean(product.get("description"), "Description provisoire a valider par le vendeur")
+    source_description = _clean_sentence_text(product.get("description")) or "Description provisoire a valider par le vendeur"
     clean_description = generate_clean_product_description(
         barcode=barcode,
         barcode_type=_clean(product.get("barcode_type")),
@@ -191,29 +212,25 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
     if len(seo_title) > 95:
         seo_title = seo_title[:92].rstrip() + "..."
 
-    marketplace_category = _marketplace_category(category, raw_title)
     short_description = (
-        f"{seo_title} est pret pour une fiche marketplace claire, avec images produit verifiees et description vendeur."
+        f"{seo_title} is ready for a seller-reviewed product listing."
     )
     if product.get("source") == "fallback":
-        short_description = f"{seo_title}: fiche provisoire a completer et valider par le vendeur."
+        short_description = f"{seo_title}: product details should be completed and reviewed by the seller."
 
     long_description = (
-        f"{clean_description} Cette fiche a ete generee automatiquement a partir du code-barres {barcode}. "
-        "Les visuels finaux sont prepares sur fond blanc pour une presentation marketplace propre. "
-        "Le vendeur doit verifier le prix, le stock, les variantes et les informations legales avant publication."
+        f"{clean_description} The seller should review the physical product details before publication."
     )
 
-    base_tags = _slug_words(raw_title, brand, category, quantity)
+    base_tags = _slug_words(raw_title, brand, quantity)
     tags = base_tags[:10]
     if "marketplace" not in tags:
         tags.append("marketplace")
 
     bullet_points = [
         f"Produit identifie par code-barres {barcode}",
-        f"Categorie recommandee: {marketplace_category}",
         "Images finales optimisees pour fiche e-commerce",
-        "Description et mots-cles generes automatiquement",
+        "Description generee sans categorie ni prix automatiques",
     ]
     if brand:
         bullet_points.insert(1, f"Marque detectee: {brand}")
@@ -224,7 +241,8 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
         "barcode": barcode,
         "title": raw_title,
         "brand": brand,
-        "category": category,
+        "product_category": None,
+        "price": None,
         "source": _clean(product.get("source"), "fallback"),
         "product_description": clean_description,
         "original_description": source_description,
@@ -237,7 +255,6 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
         "long_description": long_description,
         "bullet_points": bullet_points,
         "tags": tags,
-        "marketplace_category": marketplace_category,
         "seo_keywords": tags[:],
         "quantity": quantity,
         "image_url": _clean(product.get("image_url")),

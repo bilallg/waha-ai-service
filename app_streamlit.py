@@ -152,6 +152,8 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
         "original_description": result.get("original_description", ""),
+        "product_category": None,
+        "price": None,
         "expiration_date": result.get("expiration_date"),
         "expiration_text": result.get("expiration_text", ""),
         "expiration_confidence": result.get("expiration_confidence"),
@@ -178,6 +180,10 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
     columns[0].metric("Barcode", payload["barcode"] or "-")
     columns[1].metric("Barcode Type", payload["barcode_type"] or "-")
     columns[2].metric("Source", payload["source"] or "-")
+
+    manual_columns = st.columns(2)
+    manual_columns[0].info("Price to be completed manually")
+    manual_columns[1].info("Category to be selected by the seller")
 
     st.subheader("Expiration Date")
     if payload["expiration_found"]:
@@ -232,6 +238,8 @@ def process_barcode_input(image_path: str | Path) -> None:
                 "product_title": "",
                 "product_description": "",
                 "original_description": "",
+                "product_category": None,
+                "price": None,
                 "expiration_date": None,
                 "expiration_text": "",
                 "expiration_confidence": None,
@@ -413,7 +421,8 @@ def render_dashboard(result: dict[str, Any] | None) -> None:
         {
             "title": metadata.get("title", ""),
             "brand": metadata.get("brand", ""),
-            "category": metadata.get("category", ""),
+            "product_category": None,
+            "price": None,
             "quantity": metadata.get("quantity", ""),
             "source": metadata.get("source", ""),
         },
@@ -479,7 +488,8 @@ def render_marketplace(result: dict[str, Any] | None) -> None:
     first, second = st.columns(2)
     with first:
         st.text_input("Titre SEO", product_data.get("seo_title", ""), disabled=True)
-        st.text_input("Catégorie", product_data.get("marketplace_category", ""), disabled=True)
+        st.text_input("Prix", "Price to be completed manually", disabled=True)
+        st.text_input("Catégorie", "Category to be selected by the seller", disabled=True)
         st.text_area("Description courte", product_data.get("short_description", ""), disabled=True)
     with second:
         st.text_area("Description longue", product_data.get("long_description", ""), height=150, disabled=True)
