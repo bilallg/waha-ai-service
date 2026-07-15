@@ -6,6 +6,7 @@ ultralytics
 Pillow
 opencv-python-headless
 pyzbar
+pytesseract
 requests
 numpy
 google-search-results

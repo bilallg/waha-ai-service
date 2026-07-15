@@ -15,6 +15,7 @@ try:
     from .image_filter_dl import filter_images, is_barcode_dominant
     from .image_search import search_and_download
     from .improve_images import create_product_video, enhance_image, improve_images_batch
+    from .expiration_date_ocr import detect_expiration_date
     from .export_marketplace import export_marketplace_package
     from .product_description_generator import generate_clean_product_description, save_product_data
     from .product_lookup import lookup_product
@@ -26,6 +27,7 @@ except ImportError:
     from image_filter_dl import filter_images, is_barcode_dominant
     from image_search import search_and_download
     from improve_images import create_product_video, enhance_image, improve_images_batch
+    from expiration_date_ocr import detect_expiration_date
     from export_marketplace import export_marketplace_package
     from product_description_generator import generate_clean_product_description, save_product_data
     from product_lookup import lookup_product
@@ -153,6 +155,19 @@ def _normalize_serpapi_description(
     return normalized
 
 
+def _safe_detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
+    try:
+        return detect_expiration_date(image_path)
+    except Exception:
+        return {
+            "expiration_date": None,
+            "expiration_text": "",
+            "expiration_confidence": None,
+            "expiration_found": False,
+            "message": "Expiration date not detected",
+        }
+
+
 def process_barcode_image(image_file: Any) -> dict[str, Any]:
     """Reusable lightweight barcode service: YOLO detection, pyzbar decode, SerpAPI enrichment."""
     warnings: list[str] = []
@@ -268,11 +283,14 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         barcode=barcode,
         barcode_type=barcode_metadata.get("barcode_type", ""),
     )
+    expiration_result = _safe_detect_expiration_date(image_path)
 
     return {
         **serpapi_result,
+        **expiration_result,
         "status": "success",
         "success": True,
+        "message": "Barcode detected and enriched.",
         "mode": "YOLOv8 + pyzbar + SerpAPI",
         "barcode": barcode,
         "barcode_type": barcode_metadata.get("barcode_type", ""),
@@ -470,6 +488,9 @@ def run_pipeline(
         barcode_type=barcode_metadata.get("barcode_type", ""),
     )
 
+    _notify(progress_callback, "Lecture OCR de la date d'expiration...")
+    expiration_result = _safe_detect_expiration_date(input_path)
+
     _notify(progress_callback, "Identification produit via OpenFoodFacts...")
     try:
         product_lookup = lookup_product(barcode)
@@ -546,6 +567,7 @@ def run_pipeline(
     if not final_images:
         return {
             "status": "error",
+            **expiration_result,
             "message": (
                 "Impossible de produire des images marketplace: aucune image produit valide. "
                 "Active SerpAPI ou verifie que la recherche web trouve des images du produit."
@@ -583,6 +605,7 @@ def run_pipeline(
     product_lookup["original_description"] = serpapi_result.get("original_description", "")
     product_lookup["links"] = serpapi_result.get("links") or []
     product_lookup["barcode_type"] = barcode_metadata.get("barcode_type", "")
+    product_lookup.update(expiration_result)
     product_data = save_product_data(product_lookup, product_data_path)
     product_data.update(
         {
@@ -625,6 +648,7 @@ def run_pipeline(
     save_product_history(history_entry)
 
     result = {
+        **expiration_result,
         "status": "success",
         "message": "Pipeline WAHA IA termine",
         "barcode": barcode,

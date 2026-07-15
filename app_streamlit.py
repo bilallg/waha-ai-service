@@ -152,6 +152,10 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
         "original_description": result.get("original_description", ""),
+        "expiration_date": result.get("expiration_date"),
+        "expiration_text": result.get("expiration_text", ""),
+        "expiration_confidence": result.get("expiration_confidence"),
+        "expiration_found": bool(result.get("expiration_found")),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
         "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI",
@@ -174,6 +178,19 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
     columns[0].metric("Barcode", payload["barcode"] or "-")
     columns[1].metric("Barcode Type", payload["barcode_type"] or "-")
     columns[2].metric("Source", payload["source"] or "-")
+
+    st.subheader("Expiration Date")
+    if payload["expiration_found"]:
+        st.success(f"Expiration date detected: {payload['expiration_date']}")
+        if payload["expiration_confidence"] is not None:
+            st.caption(f"OCR confidence: {float(payload['expiration_confidence']):.0%}")
+        if payload["expiration_text"]:
+            st.text_input("OCR text match", payload["expiration_text"], disabled=True, key="scan_expiration_text")
+    else:
+        st.warning("Expiration date not detected. Please take a clearer image of the printed date.")
+        if payload["expiration_text"]:
+            with st.expander("OCR text read from image"):
+                st.write(payload["expiration_text"])
 
     st.text_input("Product title", payload["product_title"], disabled=True, key="scan_product_title")
     st.text_area("Product description", payload["product_description"], height=120, disabled=True, key="scan_product_description")
@@ -215,6 +232,10 @@ def process_barcode_input(image_path: str | Path) -> None:
                 "product_title": "",
                 "product_description": "",
                 "original_description": "",
+                "expiration_date": None,
+                "expiration_text": "",
+                "expiration_confidence": None,
+                "expiration_found": False,
                 "images": [],
                 "links": [],
                 "source": "YOLOv8 + ZBar + SerpAPI",
