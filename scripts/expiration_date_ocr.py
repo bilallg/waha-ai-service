@@ -35,7 +35,7 @@ DATE_PATTERNS = [
 def _not_detected() -> dict[str, Any]:
     return {
         "expiration_date": None,
-        "expiration_text": "",
+        "expiration_text": None,
         "expiration_confidence": None,
         "expiration_found": False,
         "message": NOT_DETECTED_MESSAGE,
@@ -108,9 +108,12 @@ def _match_expiration_date(text: str) -> tuple[str | None, str]:
     if not normalized_text:
         return None, ""
 
+    normalized_text = re.sub(r"\b\d{8,}\b", " ", normalized_text)
     for pattern in DATE_PATTERNS:
         for match in pattern.finditer(normalized_text):
             raw_date = match.group("date")
+            if re.fullmatch(r"\d{8,}", raw_date):
+                continue
             normalized_date = _normalize_date(raw_date)
             if normalized_date:
                 return normalized_date, match.group(0).strip(" :;-")
@@ -123,15 +126,26 @@ def _preprocess_images(image_path: str | Path) -> list[Image.Image]:
         original = ImageOps.exif_transpose(image).convert("RGB")
 
     grayscale = ImageOps.grayscale(original)
-    scale = 2 if max(grayscale.size) < 1800 else 1
-    resized = grayscale.resize((grayscale.width * scale, grayscale.height * scale))
-    contrasted = ImageEnhance.Contrast(ImageOps.autocontrast(resized)).enhance(1.8)
-    threshold = contrasted.point(lambda pixel: 255 if pixel > 155 else 0)
+    variants: list[Image.Image] = [original, grayscale]
+    for scale in (2, 3):
+        resized = grayscale.resize((grayscale.width * scale, grayscale.height * scale))
+        autocontrasted = ImageOps.autocontrast(resized)
+        contrasted = ImageEnhance.Contrast(autocontrasted).enhance(2.0)
+        sharp = ImageEnhance.Sharpness(contrasted).enhance(1.6)
+        variants.extend(
+            [
+                resized,
+                contrasted,
+                sharp,
+                contrasted.point(lambda pixel: 255 if pixel > 145 else 0),
+                contrasted.point(lambda pixel: 255 if pixel > 165 else 0),
+            ]
+        )
 
-    return [contrasted, threshold, resized, grayscale, original]
+    return variants
 
 
-def _ocr_image(image: Image.Image) -> tuple[str, float | None]:
+def _ocr_image(image: Image.Image, page_segmentation_mode: int = 6) -> tuple[str, float | None]:
     try:
         import pytesseract
     except ImportError as exc:
@@ -142,7 +156,7 @@ def _ocr_image(image: Image.Image) -> tuple[str, float | None]:
     for language in ("eng+fra", "eng", None):
         try:
             kwargs = {
-                "config": "--psm 6",
+                "config": f"--psm {page_segmentation_mode}",
                 "output_type": pytesseract.Output.DICT,
             }
             if language:
@@ -183,21 +197,22 @@ def detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
 
     try:
         for image in variants:
-            text, confidence = _ocr_image(image)
+            for psm in (6, 7, 11, 12):
+                text, confidence = _ocr_image(image, page_segmentation_mode=psm)
 
-            expiration_date, expiration_text = _match_expiration_date(text)
-            if not expiration_date:
-                continue
-            if confidence is not None and confidence < MIN_OCR_CONFIDENCE:
-                continue
+                expiration_date, expiration_text = _match_expiration_date(text)
+                if not expiration_date:
+                    continue
+                if confidence is not None and confidence < MIN_OCR_CONFIDENCE:
+                    continue
 
-            return {
-                "expiration_date": expiration_date,
-                "expiration_text": expiration_text,
-                "expiration_confidence": confidence,
-                "expiration_found": True,
-                "message": "Expiration date detected",
-            }
+                return {
+                    "expiration_date": expiration_date,
+                    "expiration_text": expiration_text,
+                    "expiration_confidence": confidence,
+                    "expiration_found": True,
+                    "message": "Expiration date detected",
+                }
     except Exception:
         return _not_detected()
 

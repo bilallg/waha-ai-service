@@ -173,7 +173,7 @@ def _safe_detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
     except Exception:
         return {
             "expiration_date": None,
-            "expiration_text": "",
+            "expiration_text": None,
             "expiration_confidence": None,
             "expiration_found": False,
             "message": "Expiration date not detected",

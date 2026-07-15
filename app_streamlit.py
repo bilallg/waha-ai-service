@@ -37,6 +37,7 @@ from chatbot.chatbot_recommendation import answer_seller_question
 from evaluate_decoding import compare_decoding_methods, evaluate_decoding_folder
 from evaluate_yolo_barcode import evaluate_yolo_model
 from export_marketplace import export_marketplace_package
+from expiration_date_ocr import detect_expiration_date
 from main_pipeline import (
     PRODUCTS_HISTORY_PATH,
     UPLOADS_DIR,
@@ -152,6 +153,7 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
         "expiration_date": result.get("expiration_date"),
+        "expiration_text": result.get("expiration_text"),
         "expiration_found": bool(result.get("expiration_found")),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
@@ -179,6 +181,8 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
     st.subheader("Expiration Date")
     if payload["expiration_found"]:
         st.success(f"Expiration date detected: {payload['expiration_date']}")
+        if payload["expiration_text"]:
+            st.caption(f"OCR text: {payload['expiration_text']}")
     else:
         st.warning("Expiration date not detected. Please take a clearer image of the printed date.")
 
@@ -219,11 +223,73 @@ def process_barcode_input(image_path: str | Path) -> None:
                 "product_title": "",
                 "product_description": "",
                 "expiration_date": None,
+                "expiration_text": None,
                 "expiration_found": False,
                 "images": [],
                 "links": [],
                 "source": "YOLOv8 + ZBar + SerpAPI",
             }
+
+
+def process_expiration_input(image_path: str | Path) -> None:
+    with st.spinner("Processing expiration date..."):
+        try:
+            expiration_result = detect_expiration_date(image_path)
+        except Exception:
+            expiration_result = {
+                "expiration_date": None,
+                "expiration_text": None,
+                "expiration_found": False,
+                "message": "Expiration date not detected",
+            }
+
+    current_result = dict(st.session_state.get("barcode_scan_result") or {})
+    current_result.update(
+        {
+            "expiration_date": expiration_result.get("expiration_date"),
+            "expiration_text": expiration_result.get("expiration_text") if expiration_result.get("expiration_found") else None,
+            "expiration_found": bool(expiration_result.get("expiration_found")),
+        }
+    )
+    st.session_state.barcode_scan_result = current_result
+
+
+def render_expiration_scan_section(result: dict[str, Any] | None) -> None:
+    if not result or result.get("status") != "success" or not result.get("barcode"):
+        return
+
+    st.divider()
+    st.subheader("Scan expiration date")
+    st.caption("Use this when the printed expiration date is on another part of the packaging.")
+    upload_tab, camera_tab = st.tabs(["Upload expiration image", "Camera expiration scan"])
+
+    with upload_tab:
+        uploaded = st.file_uploader(
+            "Image contenant la date d'expiration",
+            type=IMAGE_TYPES,
+            key="expiration_upload",
+        )
+        if uploaded:
+            try:
+                saved = save_uploaded_file(uploaded, "expiration_")
+                st.image(str(saved), caption="Expiration image", use_container_width=True)
+                if st.button("Process expiration image", type="primary", use_container_width=True, key="process_expiration_upload"):
+                    process_expiration_input(saved)
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Impossible d'enregistrer l'image de date: {exc}")
+
+    with camera_tab:
+        captured = st.camera_input("Capture printed expiration date", key="expiration_camera_input")
+        if captured:
+            try:
+                saved = save_uploaded_file(captured, "expiration_camera_")
+                st.image(str(saved), caption="Expiration photo", use_container_width=True)
+                if st.button("Process expiration photo", type="primary", use_container_width=True, key="process_expiration_camera"):
+                    process_expiration_input(saved)
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Impossible d'enregistrer la photo de date: {exc}")
 
 
 def render_barcode_input_modes() -> None:
@@ -260,7 +326,10 @@ def render_barcode_input_modes() -> None:
             except Exception as exc:
                 st.error(f"Impossible d'enregistrer la photo: {exc}")
 
-    render_barcode_result(st.session_state.get("barcode_scan_result"))
+    result = st.session_state.get("barcode_scan_result")
+    render_barcode_result(result)
+    render_expiration_scan_section(result)
+    render_expiration_scan_section(result)
 
 
 def approval_key(result: dict[str, Any]) -> str:

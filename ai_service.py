@@ -25,6 +25,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "").strip()
 WAHA_AI_API_KEY = os.getenv("WAHA_AI_API_KEY", "").strip()
 
+from expiration_date_ocr import detect_expiration_date
 from main_pipeline import process_barcode_image
 
 
@@ -37,7 +38,7 @@ app = FastAPI(
 
 @app.middleware("http")
 async def reject_unauthorized_ai_requests(request: Request, call_next):
-    if request.url.path == "/ai/barcode/detect" and request.method.upper() == "POST":
+    if request.url.path in {"/ai/barcode/detect", "/ai/expiration/detect"} and request.method.upper() == "POST":
         if not _is_authorized(request.headers.get("X-API-Key")):
             return _unauthorized()
     return await call_next(request)
@@ -65,7 +66,13 @@ def _safe_upload_path(filename: str | None) -> Path:
 
 def _shape_response(result: dict) -> dict:
     success = result.get("status") == "success" and bool(result.get("barcode"))
-    message = "Barcode detected and enriched." if success else result.get("message", "Barcode detection failed.")
+    message = (
+        "Barcode detected and enriched."
+        if success and result.get("expiration_found")
+        else "Expiration date not detected"
+        if success
+        else result.get("message", "Barcode detection failed.")
+    )
 
     return {
         "success": success,
@@ -74,6 +81,7 @@ def _shape_response(result: dict) -> dict:
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
         "expiration_date": result.get("expiration_date"),
+        "expiration_text": result.get("expiration_text"),
         "expiration_found": bool(result.get("expiration_found")),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
@@ -119,10 +127,53 @@ async def detect_barcode(
                 "product_title": "",
                 "product_description": "",
                 "expiration_date": None,
+                "expiration_text": None,
                 "expiration_found": False,
                 "images": [],
                 "links": [],
                 "source": "YOLOv8 + ZBar + SerpAPI",
+                "message": f"AI service error: {exc}",
+            },
+        )
+    finally:
+        await file.close()
+        upload_path.unlink(missing_ok=True)
+
+
+def _shape_expiration_response(result: dict) -> dict:
+    found = bool(result.get("expiration_found"))
+    return {
+        "success": True,
+        "expiration_date": result.get("expiration_date"),
+        "expiration_text": result.get("expiration_text") if found else None,
+        "expiration_found": found,
+        "message": "Expiration date detected" if found else "Expiration date not detected",
+    }
+
+
+@app.post("/ai/expiration/detect", response_model=None)
+async def detect_expiration(
+    file: UploadFile = File(...),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    if not _is_authorized(x_api_key):
+        return _unauthorized()
+
+    upload_path = _safe_upload_path(file.filename)
+    try:
+        with upload_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        result = detect_expiration_date(upload_path)
+        return JSONResponse(status_code=200, content=_shape_expiration_response(result))
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "expiration_date": None,
+                "expiration_text": None,
+                "expiration_found": False,
                 "message": f"AI service error: {exc}",
             },
         )
