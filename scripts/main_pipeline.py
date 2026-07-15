@@ -140,7 +140,7 @@ def _normalize_serpapi_description(
     barcode: str,
     barcode_type: str = "",
 ) -> dict[str, Any]:
-    original_description = str(serpapi_result.get("product_description") or "").strip()
+    original_description = _remove_price_text(str(serpapi_result.get("product_description") or "").strip())
     clean_description = generate_clean_product_description(
         barcode=barcode,
         barcode_type=barcode_type,
@@ -150,9 +150,21 @@ def _normalize_serpapi_description(
         source=serpapi_result.get("source", ""),
     )
     normalized = {**serpapi_result, "product_description": clean_description}
-    if original_description:
-        normalized["original_description"] = original_description
     return normalized
+
+
+def _remove_price_text(text: str) -> str:
+    cleaned = re.sub(
+        r"(?i)\b(?:price|prix|cost|sale)\s*:?\s*(?:[$€£]|mad|dh|dhs|usd|eur|gbp)?\s*\d+(?:[.,]\d{1,2})?",
+        "",
+        text,
+    )
+    cleaned = re.sub(r"(?i)(?:[$€£]\s*\d+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:mad|dh|dhs|usd|eur|gbp))", "", cleaned)
+    cleaned = re.sub(r"(?i)\b(?:buy now|shop now|click here|read more|see more)\b", "", cleaned)
+    cleaned = re.sub(r"\s+([.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"(?:\.\s*){2,}", ". ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
+    return cleaned
 
 
 def _safe_detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
@@ -166,6 +178,15 @@ def _safe_detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
             "expiration_found": False,
             "message": "Expiration date not detected",
         }
+
+
+def _seller_managed_product_fields(product: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(product)
+    sanitized.pop("category", None)
+    sanitized.pop("marketplace_category", None)
+    sanitized.pop("product_category", None)
+    sanitized.pop("price", None)
+    return sanitized
 
 
 def process_barcode_image(image_file: Any) -> dict[str, Any]:
@@ -294,7 +315,6 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         "mode": "YOLOv8 + pyzbar + SerpAPI",
         "barcode": barcode,
         "barcode_type": barcode_metadata.get("barcode_type", ""),
-        "original_description": serpapi_result.get("original_description", ""),
         "warnings": warnings,
         "serpapi_result": serpapi_result,
         **barcode_metadata,
@@ -574,8 +594,8 @@ def run_pipeline(
             ),
             "barcode": barcode,
             "product_folder": product_folder,
-            "metadata": product_lookup,
-            "product_lookup": product_lookup,
+            "metadata": _seller_managed_product_fields(product_lookup),
+            "product_lookup": _seller_managed_product_fields(product_lookup),
             "serpapi_result": serpapi_result,
             "downloaded_images": downloaded_images,
             "selected_images": selected_images,
@@ -602,7 +622,6 @@ def run_pipeline(
     if product_lookup.get("source") == "fallback" and serpapi_result.get("product_title"):
         product_lookup["title"] = serpapi_result["product_title"]
     product_lookup["description"] = serpapi_result.get("product_description") or product_lookup.get("description", "")
-    product_lookup["original_description"] = serpapi_result.get("original_description", "")
     product_lookup["links"] = serpapi_result.get("links") or []
     product_lookup["barcode_type"] = barcode_metadata.get("barcode_type", "")
     product_lookup.update(expiration_result)
@@ -640,7 +659,6 @@ def run_pipeline(
         "barcode": barcode,
         "title": product_data.get("title", product_lookup.get("title", "")),
         "brand": product_data.get("brand", ""),
-        "category": product_data.get("marketplace_category") or product_data.get("category", ""),
         "final_images_count": len(final_images),
         "video_path": video_path or "",
         "export_zip": export_paths.get("zip_path", ""),
@@ -653,8 +671,8 @@ def run_pipeline(
         "message": "Pipeline WAHA IA termine",
         "barcode": barcode,
         "product_folder": product_folder,
-        "metadata": product_lookup,
-        "product_lookup": product_lookup,
+        "metadata": _seller_managed_product_fields(product_lookup),
+        "product_lookup": _seller_managed_product_fields(product_lookup),
         "serpapi_result": serpapi_result,
         "product_data": product_data,
         "product_data_path": str(product_data_path),

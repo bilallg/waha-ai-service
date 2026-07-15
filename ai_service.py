@@ -65,10 +65,7 @@ def _safe_upload_path(filename: str | None) -> Path:
 
 def _shape_response(result: dict) -> dict:
     success = result.get("status") == "success" and bool(result.get("barcode"))
-    warning = result.get("warning") or "; ".join(result.get("warnings") or [])
-    message = result.get("message") or ("Barcode detected and enriched." if success else "Barcode detection failed.")
-    if warning and success:
-        message = f"{message} {warning}"
+    message = "Barcode detected and enriched." if success else result.get("message", "Barcode detection failed.")
 
     return {
         "success": success,
@@ -76,12 +73,7 @@ def _shape_response(result: dict) -> dict:
         "barcode_type": result.get("barcode_type", ""),
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
-        "original_description": result.get("original_description", ""),
-        "product_category": None,
-        "price": None,
         "expiration_date": result.get("expiration_date"),
-        "expiration_text": result.get("expiration_text", ""),
-        "expiration_confidence": result.get("expiration_confidence"),
         "expiration_found": bool(result.get("expiration_found")),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
@@ -126,12 +118,7 @@ async def detect_barcode(
                 "barcode_type": "",
                 "product_title": "",
                 "product_description": "",
-                "original_description": "",
-                "product_category": None,
-                "price": None,
                 "expiration_date": None,
-                "expiration_text": "",
-                "expiration_confidence": None,
                 "expiration_found": False,
                 "images": [],
                 "links": [],

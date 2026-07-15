@@ -151,12 +151,7 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "barcode_type": result.get("barcode_type", ""),
         "product_title": result.get("product_title", ""),
         "product_description": result.get("product_description", ""),
-        "original_description": result.get("original_description", ""),
-        "product_category": None,
-        "price": None,
         "expiration_date": result.get("expiration_date"),
-        "expiration_text": result.get("expiration_text", ""),
-        "expiration_confidence": result.get("expiration_confidence"),
         "expiration_found": bool(result.get("expiration_found")),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
@@ -181,28 +176,14 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
     columns[1].metric("Barcode Type", payload["barcode_type"] or "-")
     columns[2].metric("Source", payload["source"] or "-")
 
-    manual_columns = st.columns(2)
-    manual_columns[0].info("Price to be completed manually")
-    manual_columns[1].info("Category to be selected by the seller")
-
     st.subheader("Expiration Date")
     if payload["expiration_found"]:
         st.success(f"Expiration date detected: {payload['expiration_date']}")
-        if payload["expiration_confidence"] is not None:
-            st.caption(f"OCR confidence: {float(payload['expiration_confidence']):.0%}")
-        if payload["expiration_text"]:
-            st.text_input("OCR text match", payload["expiration_text"], disabled=True, key="scan_expiration_text")
     else:
         st.warning("Expiration date not detected. Please take a clearer image of the printed date.")
-        if payload["expiration_text"]:
-            with st.expander("OCR text read from image"):
-                st.write(payload["expiration_text"])
 
     st.text_input("Product title", payload["product_title"], disabled=True, key="scan_product_title")
     st.text_area("Product description", payload["product_description"], height=120, disabled=True, key="scan_product_description")
-    if payload["original_description"]:
-        with st.expander("Original description"):
-            st.write(payload["original_description"])
 
     images = payload["images"][:6]
     if images:
@@ -237,12 +218,7 @@ def process_barcode_input(image_path: str | Path) -> None:
                 "barcode_type": "",
                 "product_title": "",
                 "product_description": "",
-                "original_description": "",
-                "product_category": None,
-                "price": None,
                 "expiration_date": None,
-                "expiration_text": "",
-                "expiration_confidence": None,
                 "expiration_found": False,
                 "images": [],
                 "links": [],
@@ -421,8 +397,6 @@ def render_dashboard(result: dict[str, Any] | None) -> None:
         {
             "title": metadata.get("title", ""),
             "brand": metadata.get("brand", ""),
-            "product_category": None,
-            "price": None,
             "quantity": metadata.get("quantity", ""),
             "source": metadata.get("source", ""),
         },
@@ -488,8 +462,6 @@ def render_marketplace(result: dict[str, Any] | None) -> None:
     first, second = st.columns(2)
     with first:
         st.text_input("Titre SEO", product_data.get("seo_title", ""), disabled=True)
-        st.text_input("Prix", "Price to be completed manually", disabled=True)
-        st.text_input("Catégorie", "Category to be selected by the seller", disabled=True)
         st.text_area("Description courte", product_data.get("short_description", ""), disabled=True)
     with second:
         st.text_area("Description longue", product_data.get("long_description", ""), height=150, disabled=True)

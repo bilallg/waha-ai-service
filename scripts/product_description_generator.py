@@ -6,9 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-FALLBACK_DESCRIPTION = (
-    "This product was identified using its barcode. Additional product details can be completed manually by the seller."
-)
+FALLBACK_DESCRIPTION = "Product details are limited and can be completed manually by the seller before publication."
 
 
 def _clean(value: object, fallback: str = "") -> str:
@@ -91,7 +89,6 @@ def generate_clean_product_description(
 ) -> str:
     """Create a concise e-commerce description from barcode enrichment data."""
     cleaned_barcode = _clean(barcode)
-    cleaned_type = _clean(barcode_type)
     cleaned_title = _clean_sentence_text(product_title)
     old_sentences = _split_sentences(old_description)
 
@@ -100,8 +97,7 @@ def generate_clean_product_description(
 
     sentences: list[str] = []
     if _has_specific_title(cleaned_title, cleaned_barcode):
-        identifier = f" with {cleaned_type} barcode {cleaned_barcode}" if cleaned_type and cleaned_barcode else ""
-        sentences.append(f"{cleaned_title} is a product identified{identifier} from available product data.")
+        sentences.extend(_title_based_description(cleaned_title))
 
     title_key = cleaned_title.lower().strip(" .!?")
     related_old_sentences = (
@@ -128,16 +124,57 @@ def generate_clean_product_description(
             continue
         seen.add(key)
         cleaned_sentences.append(cleaned)
-        if len(cleaned_sentences) >= 4:
+        if len(cleaned_sentences) >= 3:
             break
 
     if not cleaned_sentences:
         return FALLBACK_DESCRIPTION
 
-    description = " ".join(cleaned_sentences[:4])
+    description = " ".join(cleaned_sentences[:3])
+    if cleaned_barcode:
+        description = re.sub(rf"\b{re.escape(cleaned_barcode)}\b", "", description)
+        description = re.sub(r"\s+", " ", description).strip()
     if len(description) > 700:
         description = description[:697].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
     return description or FALLBACK_DESCRIPTION
+
+
+def _title_based_description(title: str) -> list[str]:
+    lowered = title.lower()
+    if "sprite" in lowered:
+        return [
+            f"{title} is a lemon-lime flavoured soft drink.",
+            "It is commonly served chilled and is suitable for retail stores, snack menus, restaurants and daily refreshment.",
+        ]
+    if "coca-cola" in lowered or "coca cola" in lowered or re.search(r"\bcoke\b", lowered):
+        return [
+            f"{title} is a cola soft drink.",
+            "It is commonly served chilled and can be listed as a ready-to-sell packaged drink.",
+        ]
+    if "fanta" in lowered:
+        return [
+            f"{title} is a fruit-flavoured carbonated soft drink.",
+            "It is commonly served chilled and can be listed as a ready-to-sell packaged drink.",
+        ]
+    if "pepsi" in lowered:
+        return [
+            f"{title} is a cola soft drink.",
+            "It is commonly served chilled and can be listed as a ready-to-sell packaged drink.",
+        ]
+    if any(word in lowered for word in ["chocolate", "chocolat", "milka"]):
+        return [
+            f"{title} is a packaged chocolate product.",
+            "It can be listed with seller-reviewed packaging details for retail sale.",
+        ]
+    if any(word in lowered for word in ["water", "eau"]):
+        return [
+            f"{title} is a packaged water product.",
+            "It can be listed with seller-reviewed packaging details for retail sale.",
+        ]
+    return [
+        f"{title} is a packaged consumer product.",
+        "It can be listed with seller-reviewed packaging details in the platform.",
+    ]
 
 
 def generate_clean_product_description_from_payload(payload: dict[str, Any]) -> str:
@@ -187,6 +224,18 @@ def _is_product_related_sentence(sentence: str, title: str) -> bool:
         "price",
         "shipping",
         "delivery",
+        "nutrition",
+        "protein",
+        "proteins",
+        "calcium",
+        "iron",
+        "vitamin",
+        "vitamins",
+        "health",
+        "benefit",
+        "benefits",
+        "calorie",
+        "calories",
     ]
     lowered = sentence.lower()
     return not any(marker in lowered for marker in unrelated_markers)
@@ -228,9 +277,9 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
         tags.append("marketplace")
 
     bullet_points = [
-        f"Produit identifie par code-barres {barcode}",
+        "Product information prepared for seller review",
         "Images finales optimisees pour fiche e-commerce",
-        "Description generee sans categorie ni prix automatiques",
+        "Description generated for seller review",
     ]
     if brand:
         bullet_points.insert(1, f"Marque detectee: {brand}")
@@ -241,14 +290,9 @@ def generate_product_description(product: dict[str, Any]) -> dict[str, Any]:
         "barcode": barcode,
         "title": raw_title,
         "brand": brand,
-        "product_category": None,
-        "price": None,
         "source": _clean(product.get("source"), "fallback"),
         "product_description": clean_description,
-        "original_description": source_description,
         "expiration_date": product.get("expiration_date"),
-        "expiration_text": _clean(product.get("expiration_text")),
-        "expiration_confidence": product.get("expiration_confidence"),
         "expiration_found": bool(product.get("expiration_found")),
         "seo_title": seo_title,
         "short_description": short_description,

@@ -181,14 +181,9 @@ def detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
     except Exception:
         return _not_detected()
 
-    best_text = ""
-    best_confidence: float | None = None
     try:
         for image in variants:
             text, confidence = _ocr_image(image)
-            if text and (best_confidence is None or (confidence or 0) > best_confidence):
-                best_text = text
-                best_confidence = confidence
 
             expiration_date, expiration_text = _match_expiration_date(text)
             if not expiration_date:
@@ -206,10 +201,7 @@ def detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
     except Exception:
         return _not_detected()
 
-    result = _not_detected()
-    result["expiration_text"] = best_text
-    result["expiration_confidence"] = best_confidence
-    return result
+    return _not_detected()
 
 
 if __name__ == "__main__":
