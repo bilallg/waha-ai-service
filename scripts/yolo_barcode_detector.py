@@ -52,7 +52,8 @@ def detect_barcodes(
     model_path: str | Path = DEFAULT_MODEL_PATH,
     output_root: str | Path = DEFAULT_OUTPUT_ROOT,
     product_identifier: str | None = None,
-    confidence_threshold: float = 0.25,
+    confidence_threshold: float = 0.15,
+    crop_padding_ratio: float = 0.18,
 ) -> dict[str, Any]:
     """Locate barcodes with YOLOv8 and persist crops plus an annotated image."""
     source = Path(image_path)
@@ -110,10 +111,14 @@ def detect_barcodes(
             class_id = int(box.cls[0].item())
             class_name = str(names.get(class_id, class_id))
             left, top, right, bottom = coordinates
-            left = max(0, int(round(left)))
-            top = max(0, int(round(top)))
-            right = min(image.shape[1], int(round(right)))
-            bottom = min(image.shape[0], int(round(bottom)))
+            width = right - left
+            height = bottom - top
+            pad_x = max(8, int(round(width * crop_padding_ratio)))
+            pad_y = max(8, int(round(height * crop_padding_ratio)))
+            left = max(0, int(round(left)) - pad_x)
+            top = max(0, int(round(top)) - pad_y)
+            right = min(image.shape[1], int(round(right)) + pad_x)
+            bottom = min(image.shape[0], int(round(bottom)) + pad_y)
 
             if right <= left or bottom <= top:
                 continue
@@ -129,6 +134,7 @@ def detect_barcodes(
                     "confidence": round(confidence, 6),
                     "class_id": class_id,
                     "class_name": class_name,
+                    "padding_ratio": crop_padding_ratio,
                     "crop_path": str(crop_path) if crop_path.exists() else "",
                 }
             )
@@ -166,7 +172,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Detecter un code-barres avec YOLOv8.")
     parser.add_argument("image", help="Image a analyser")
     parser.add_argument("--model", default=str(DEFAULT_MODEL_PATH), help="Poids YOLOv8")
-    parser.add_argument("--confidence", type=float, default=0.25, help="Seuil de confiance")
+    parser.add_argument("--confidence", type=float, default=0.15, help="Seuil de confiance")
     args = parser.parse_args()
     print(
         json.dumps(

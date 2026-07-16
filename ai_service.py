@@ -4,12 +4,14 @@ import os
 import secrets
 import shutil
 import sys
+import logging
 from pathlib import Path
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Header, Request, UploadFile
 from fastapi.responses import JSONResponse
+from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -24,6 +26,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "").strip()
 WAHA_AI_API_KEY = os.getenv("WAHA_AI_API_KEY", "").strip()
+logging.basicConfig(level=logging.INFO)
+LOGGER = logging.getLogger(__name__)
 
 from expiration_date_ocr import detect_expiration_date
 from main_pipeline import process_barcode_image
@@ -62,6 +66,14 @@ def _safe_upload_path(filename: str | None) -> Path:
     safe_suffix = suffix if len(suffix) <= 10 else ".jpg"
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     return UPLOADS_DIR / f"ai_service_{uuid4().hex}{safe_suffix}"
+
+
+def _image_size(path: str | Path) -> tuple[int, int] | None:
+    try:
+        with Image.open(path) as image:
+            return image.size
+    except Exception:
+        return None
 
 
 def _shape_response(result: dict) -> dict:
@@ -113,8 +125,22 @@ async def detect_barcode(
     try:
         with upload_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        LOGGER.info(
+            "Image received endpoint=/ai/barcode/detect filename=%s path=%s size_bytes=%s image_size=%s",
+            file.filename,
+            upload_path,
+            upload_path.stat().st_size if upload_path.exists() else 0,
+            _image_size(upload_path),
+        )
 
         result = process_barcode_image(upload_path)
+        LOGGER.info(
+            "Barcode result success=%s yolo_detections=%s pyzbar_decoded_count=%s barcode=%s",
+            result.get("status") == "success",
+            len(result.get("yolo_boxes") or []),
+            result.get("pyzbar_decoded_count", 0),
+            result.get("barcode", ""),
+        )
         response = _shape_response(result)
         return JSONResponse(status_code=200 if response["success"] else 422, content=response)
     except Exception as exc:
@@ -163,6 +189,13 @@ async def detect_expiration(
     try:
         with upload_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        LOGGER.info(
+            "Image received endpoint=/ai/expiration/detect filename=%s path=%s size_bytes=%s image_size=%s",
+            file.filename,
+            upload_path,
+            upload_path.stat().st_size if upload_path.exists() else 0,
+            _image_size(upload_path),
+        )
 
         result = detect_expiration_date(upload_path)
         return JSONResponse(status_code=200, content=_shape_expiration_response(result))

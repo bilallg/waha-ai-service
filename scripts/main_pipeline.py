@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 from dataclasses import asdict, dataclass
@@ -44,6 +45,7 @@ EXPORTS_DIR = PROJECT_ROOT / "output" / "exports"
 DATA_DIR = PROJECT_ROOT / "data"
 PRODUCTS_HISTORY_PATH = DATA_DIR / "products_history.json"
 MIN_FINAL_IMAGES = 3
+LOGGER = logging.getLogger(__name__)
 
 
 def _empty_barcode_metadata(use_yolo: bool) -> dict[str, Any]:
@@ -58,6 +60,7 @@ def _empty_barcode_metadata(use_yolo: bool) -> dict[str, Any]:
         "yolo_inference_time_ms": 0.0,
         "barcode_decode_success": False,
         "barcode_decode_error": "",
+        "pyzbar_decoded_count": 0,
     }
 
 
@@ -113,6 +116,14 @@ def save_original_image(input_image: str | Path, processed_original_dir: Path) -
         image.save(output_path, "JPEG", quality=95, optimize=True)
 
     return str(output_path)
+
+
+def _image_size(image_path: str | Path) -> tuple[int, int] | None:
+    try:
+        with Image.open(image_path) as image:
+            return image.size
+    except Exception:
+        return None
 
 
 def _save_image_file_for_processing(image_file: Any) -> Path:
@@ -194,6 +205,8 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
     warnings: list[str] = []
     image_path = _save_image_file_for_processing(image_file)
     barcode_metadata = _empty_barcode_metadata(use_yolo=True)
+    image_size = _image_size(image_path)
+    LOGGER.info("Barcode image received path=%s size=%s", image_path, image_size)
 
     if not image_path.exists():
         return {
@@ -207,17 +220,48 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         }
 
     try:
-        detection = detect_barcodes(image_path)
+        decoded = decode_barcode(image_path, [], full_image_first=True)
     except Exception as exc:
-        detection = {
-            "boxes": [],
-            "confidence": 0.0,
-            "cropped_image_paths": [],
-            "annotated_image_path": "",
-            "inference_time_ms": 0.0,
-            "warning": "",
-            "error": f"YOLO indisponible: {exc}",
+        decoded = {
+            "barcode_value": "",
+            "barcode_type": "",
+            "decoding_method": "full_image_zbar",
+            "decoding_success": False,
+            "error_message": f"Erreur de decodage: {exc}",
+            "pyzbar_decoded_count": 0,
         }
+
+    barcode = decoded.get("barcode_value") or ""
+    barcode_metadata.update(
+        {
+            "barcode_detection_method": "full_image",
+            "barcode_decoding_method": decoded.get("decoding_method", ""),
+            "barcode_type": decoded.get("barcode_type", ""),
+            "barcode_decode_success": bool(decoded.get("decoding_success")),
+            "barcode_decode_error": decoded.get("error_message", ""),
+            "pyzbar_decoded_count": decoded.get("pyzbar_decoded_count", 0),
+        }
+    )
+    LOGGER.info(
+        "Full-image pyzbar decoded_count=%s barcode_found=%s",
+        barcode_metadata["pyzbar_decoded_count"],
+        bool(barcode),
+    )
+
+    detection = {
+        "boxes": [],
+        "confidence": 0.0,
+        "cropped_image_paths": [],
+        "annotated_image_path": "",
+        "inference_time_ms": 0.0,
+        "warning": "",
+        "error": "",
+    }
+    try:
+        if not barcode:
+            detection = detect_barcodes(image_path, confidence_threshold=0.15)
+    except Exception as exc:
+        detection["error"] = f"YOLO indisponible: {exc}"
 
     barcode_metadata.update(
         {
@@ -232,28 +276,42 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         warnings.append(str(detection["warning"]))
     if detection.get("error"):
         warnings.append(str(detection["error"]))
+    LOGGER.info("YOLO detections count=%s confidence=%s", len(detection.get("boxes") or []), detection.get("confidence", 0.0))
 
-    try:
-        decoded = decode_barcode(image_path, detection.get("cropped_image_paths", []))
-    except Exception as exc:
-        decoded = {
-            "barcode_value": "",
-            "barcode_type": "",
-            "decoding_method": "full_image_zbar",
-            "decoding_success": False,
-            "error_message": f"Erreur de decodage: {exc}",
-        }
+    if not barcode:
+        try:
+            decoded = decode_barcode(
+                image_path,
+                detection.get("cropped_image_paths", []),
+                full_image_first=False,
+            )
+        except Exception as exc:
+            decoded = {
+                "barcode_value": "",
+                "barcode_type": "",
+                "decoding_method": "full_image_zbar",
+                "decoding_success": False,
+                "error_message": f"Erreur de decodage: {exc}",
+                "pyzbar_decoded_count": 0,
+            }
 
-    barcode = decoded.get("barcode_value") or ""
-    barcode_metadata.update(
-        {
-            "barcode_detection_method": "yolo" if detection.get("boxes") else "full_image_fallback",
-            "barcode_decoding_method": decoded.get("decoding_method", ""),
-            "barcode_type": decoded.get("barcode_type", ""),
-            "barcode_decode_success": bool(decoded.get("decoding_success")),
-            "barcode_decode_error": decoded.get("error_message", ""),
-        }
-    )
+        barcode = decoded.get("barcode_value") or ""
+        barcode_metadata.update(
+            {
+                "barcode_detection_method": "yolo" if detection.get("boxes") else "full_image_fallback",
+                "barcode_decoding_method": decoded.get("decoding_method", ""),
+                "barcode_type": decoded.get("barcode_type", ""),
+                "barcode_decode_success": bool(decoded.get("decoding_success")),
+                "barcode_decode_error": decoded.get("error_message", ""),
+                "pyzbar_decoded_count": barcode_metadata.get("pyzbar_decoded_count", 0)
+                + decoded.get("pyzbar_decoded_count", 0),
+            }
+        )
+        LOGGER.info(
+            "Post-YOLO pyzbar decoded_count=%s barcode_found=%s",
+            barcode_metadata["pyzbar_decoded_count"],
+            bool(barcode),
+        )
 
     if not barcode:
         try:
@@ -269,6 +327,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
                     "barcode_decode_error": "",
                 }
             )
+    LOGGER.info("Final barcode value=%s", barcode or "")
 
     if not barcode:
         if decoded.get("error_message"):
@@ -388,6 +447,7 @@ def run_pipeline(
     warnings: list[str] = []
     serpapi_result: dict[str, Any] = {}
     barcode_metadata = _empty_barcode_metadata(use_yolo)
+    LOGGER.info("Pipeline image received path=%s size=%s", input_path, _image_size(input_path))
 
     if not input_path.exists():
         return {
@@ -398,10 +458,54 @@ def run_pipeline(
         }
 
     barcode: str | None = None
+    _notify(progress_callback, "Decodage direct ZBar/pyzbar de l'image complete...")
+    try:
+        decoded = decode_barcode(input_path, [], full_image_first=True)
+    except Exception as exc:
+        decoded = {
+            "barcode_value": "",
+            "barcode_type": "",
+            "decoding_method": "full_image_zbar",
+            "decoding_success": False,
+            "error_message": f"Erreur de decodage: {exc}",
+            "pyzbar_decoded_count": 0,
+        }
+    barcode = decoded.get("barcode_value") or None
+    barcode_metadata.update(
+        {
+            "barcode_detection_method": "full_image",
+            "barcode_decoding_method": decoded.get("decoding_method", ""),
+            "barcode_type": decoded.get("barcode_type", ""),
+            "barcode_decode_success": bool(decoded.get("decoding_success")),
+            "barcode_decode_error": decoded.get("error_message", ""),
+            "pyzbar_decoded_count": decoded.get("pyzbar_decoded_count", 0),
+        }
+    )
+    LOGGER.info(
+        "Pipeline full-image pyzbar decoded_count=%s barcode_found=%s",
+        barcode_metadata["pyzbar_decoded_count"],
+        bool(barcode),
+    )
+
     if use_yolo:
-        _notify(progress_callback, "Localisation du code-barres avec YOLOv8...")
+        if barcode:
+            _notify(progress_callback, "Code-barres decode sans YOLO.")
+        else:
+            _notify(progress_callback, "Localisation du code-barres avec YOLOv8...")
         try:
-            detection = detect_barcodes(input_path)
+            detection = (
+                {
+                    "boxes": [],
+                    "confidence": 0.0,
+                    "cropped_image_paths": [],
+                    "annotated_image_path": "",
+                    "inference_time_ms": 0.0,
+                    "warning": "",
+                    "error": "",
+                }
+                if barcode
+                else detect_barcodes(input_path, confidence_threshold=0.15)
+            )
         except Exception as exc:
             detection = {
                 "boxes": [],
@@ -426,30 +530,44 @@ def run_pipeline(
             warnings.append(str(detection["warning"]))
         if detection.get("error"):
             warnings.append(str(detection["error"]))
+        LOGGER.info("Pipeline YOLO detections count=%s confidence=%s", len(detection.get("boxes") or []), detection.get("confidence", 0.0))
 
-        _notify(progress_callback, "Decodage ZBar des crops YOLO puis fallback image complete...")
-        try:
-            decoded = decode_barcode(input_path, detection.get("cropped_image_paths", []))
-        except Exception as exc:
-            decoded = {
-                "barcode_value": "",
-                "barcode_type": "",
-                "decoding_method": "full_image_zbar",
-                "decoding_success": False,
-                "error_message": f"Erreur de decodage: {exc}",
-            }
-        barcode = decoded.get("barcode_value") or None
-        barcode_metadata.update(
-            {
-                "barcode_detection_method": "yolo" if detection.get("boxes") else "full_image_fallback",
-                "barcode_decoding_method": decoded.get("decoding_method", ""),
-                "barcode_type": decoded.get("barcode_type", ""),
-                "barcode_decode_success": bool(decoded.get("decoding_success")),
-                "barcode_decode_error": decoded.get("error_message", ""),
-            }
-        )
-        if decoded.get("error_message") and not barcode:
-            warnings.append(str(decoded["error_message"]))
+        if not barcode:
+            _notify(progress_callback, "Decodage ZBar des crops YOLO puis fallback image complete...")
+            try:
+                decoded = decode_barcode(
+                    input_path,
+                    detection.get("cropped_image_paths", []),
+                    full_image_first=False,
+                )
+            except Exception as exc:
+                decoded = {
+                    "barcode_value": "",
+                    "barcode_type": "",
+                    "decoding_method": "full_image_zbar",
+                    "decoding_success": False,
+                    "error_message": f"Erreur de decodage: {exc}",
+                    "pyzbar_decoded_count": 0,
+                }
+            barcode = decoded.get("barcode_value") or None
+            barcode_metadata.update(
+                {
+                    "barcode_detection_method": "yolo" if detection.get("boxes") else "full_image_fallback",
+                    "barcode_decoding_method": decoded.get("decoding_method", ""),
+                    "barcode_type": decoded.get("barcode_type", ""),
+                    "barcode_decode_success": bool(decoded.get("decoding_success")),
+                    "barcode_decode_error": decoded.get("error_message", ""),
+                    "pyzbar_decoded_count": barcode_metadata.get("pyzbar_decoded_count", 0)
+                    + decoded.get("pyzbar_decoded_count", 0),
+                }
+            )
+            LOGGER.info(
+                "Pipeline post-YOLO pyzbar decoded_count=%s barcode_found=%s",
+                barcode_metadata["pyzbar_decoded_count"],
+                bool(barcode),
+            )
+            if decoded.get("error_message") and not barcode:
+                warnings.append(str(decoded["error_message"]))
 
     if not barcode:
         _notify(progress_callback, "Fallback vers le scanner historique pyzbar/ZBar...")
@@ -471,6 +589,7 @@ def run_pipeline(
                     "barcode_decode_error": "",
                 }
             )
+    LOGGER.info("Pipeline final barcode value=%s", barcode or "")
 
     if not barcode:
         return {
