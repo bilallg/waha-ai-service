@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from main_pipeline import (
     process_barcode_image,
     run_pipeline,
 )
+from scripts.openai_product_content import generate_openai_product_content
 
 
 st.set_page_config(page_title="WAHA Platform", page_icon="🛍️", layout="wide")
@@ -65,6 +67,154 @@ CUSTOM_CSS = """
 """
 
 IMAGE_TYPES = ["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"]
+BAD_DESCRIPTION_PHRASES = (
+    "barcode",
+    "ean13",
+    "ean-13",
+    "identified with",
+    "available product data",
+    "common name",
+    "categories",
+    "brands",
+    "packaging",
+    "reduced risk of noncommunicable",
+)
+
+
+def is_bad_description(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(phrase in lowered for phrase in BAD_DESCRIPTION_PHRASES)
+
+
+def _clean_fallback_title(title: str) -> str:
+    cleaned = re.sub(r"\b\d{8,14}\b", "", str(title or "Produit détecté"))
+    cleaned = re.sub(r"(?i)\b(?:EAN\s*13|EAN\s*[-/]\s*13|EAN13|barcode|code[-\s]?barres?)\b", "", cleaned)
+    cleaned = re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
+    return cleaned or "Produit détecté"
+
+
+def _clean_fallback_description(product_title: str) -> str:
+    return f"{product_title} est un produit adapté à la vente en magasin, snack ou point de vente."
+
+
+def _product_data_for_openai(result: dict[str, Any], product_title: str, product_description: str) -> dict[str, Any]:
+    serpapi_result = result.get("serpapi_result") or {}
+    product_lookup = result.get("product_lookup") or result.get("metadata") or {}
+    return {
+        "barcode": result.get("barcode", ""),
+        "barcode_type": result.get("barcode_type", ""),
+        "title": product_lookup.get("title") or result.get("product_name") or result.get("name") or product_title,
+        "product_name": product_lookup.get("title") or result.get("product_name") or result.get("name") or "",
+        "product_title": product_title,
+        "description": product_description,
+        "quantity": result.get("quantity") or product_lookup.get("quantity", ""),
+        "brand": result.get("brand") or product_lookup.get("brand", ""),
+        "categories": result.get("categories") or result.get("category") or product_lookup.get("category", ""),
+        "source": result.get("source") or serpapi_result.get("source", ""),
+    }
+
+
+def normalize_product_result(result: dict) -> dict:
+    if not result:
+        return result
+
+    product_title = (
+        result.get("product_title")
+        or result.get("title")
+        or result.get("product_name")
+        or result.get("name")
+        or "Produit détecté"
+    )
+    product_title = _clean_fallback_title(product_title)
+    product_description = (
+        result.get("product_description")
+        or result.get("description")
+        or result.get("original_description")
+        or ""
+    )
+
+    result.update(
+        {
+            "product_title": product_title,
+            "product_description": product_description,
+            "description_source": result.get("description_source") or "unknown",
+        }
+    )
+
+    should_call_openai = (
+        result.get("status") == "success"
+        and bool(result.get("barcode"))
+        and (
+            not product_description
+            or is_bad_description(product_description)
+            or result.get("description_source") in {"", "unknown", None}
+        )
+    )
+    if should_call_openai:
+        print("CALLING OPENAI PRODUCT DESCRIPTION")
+        product_data = _product_data_for_openai(result, product_title, product_description)
+        clean_fallback = _clean_fallback_description(product_title)
+        try:
+            openai_result = generate_openai_product_content(product_data)
+            if openai_result.get("description_source") != "OpenAI":
+                raise RuntimeError("OpenAI helper returned clean fallback")
+            openai_title = openai_result.get("product_title", product_title)
+            openai_description = openai_result.get("product_description") or clean_fallback
+            if is_bad_description(openai_description):
+                raise ValueError("OpenAI description contains forbidden raw metadata")
+            result.update(
+                {
+                    "product_title": openai_title,
+                    "product_description": openai_description,
+                    "description_source": "OpenAI",
+                    "source": "SerpAPI + OpenAI",
+                }
+            )
+            print("OPENAI DESCRIPTION SUCCESS")
+        except Exception as exc:
+            print(f"OPENAI DESCRIPTION FAILED: {exc}")
+            result.update(
+                {
+                    "product_title": product_title,
+                    "product_description": clean_fallback,
+                    "description_source": "clean_fallback",
+                    "source": "SerpAPI + clean_fallback",
+                }
+            )
+
+    if is_bad_description(result.get("product_description", "")):
+        result.update(
+            {
+                "product_description": _clean_fallback_description(result.get("product_title") or product_title),
+                "description_source": "clean_fallback",
+                "source": "SerpAPI + clean_fallback",
+            }
+        )
+
+    if result.get("description_source") == "OpenAI":
+        result["source"] = "SerpAPI + OpenAI"
+
+    serpapi_result = result.get("serpapi_result")
+    if isinstance(serpapi_result, dict):
+        serpapi_result["product_title"] = result.get("product_title", "")
+        serpapi_result["product_description"] = result.get("product_description", "")
+        serpapi_result["description_source"] = result.get("description_source", "")
+        if result.get("source"):
+            serpapi_result["source"] = result.get("source", "")
+
+    product_data = result.get("product_data")
+    if isinstance(product_data, dict):
+        product_data["title"] = result.get("product_title", "")
+        product_data["seo_title"] = result.get("product_title", "")
+        product_data["product_description"] = result.get("product_description", "")
+        product_data["short_description"] = result.get("product_description", "")
+        product_data["long_description"] = result.get("product_description", "")
+
+    print(f"FINAL TITLE: {result.get('product_title', '')}")
+    print(f"FINAL DESCRIPTION: {result.get('product_description', '')}")
+    print(f"FINAL DESCRIPTION SOURCE: {result.get('description_source', 'unknown')}")
+    return result
 
 
 def save_uploaded_file(uploaded_file: Any, prefix: str = "") -> Path:
@@ -113,11 +263,13 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
             "SERPAPI_API_KEY manquante. Le barcode est détecté, mais les informations produit/images web ne peuvent pas être récupérées."
         )
 
-    product_title = result["product_title"]
-    product_description = result["product_description"]
+    result = normalize_product_result(result)
+    product_title = result.get("product_title", "")
+    product_description = result.get("product_description", "")
     st.text_input("Product title", product_title, disabled=True)
     st.text_area("Product description", product_description, height=130, disabled=True)
-    st.caption(f"Source utilisée: {serpapi_result.get('source') or 'SerpAPI'}")
+    st.caption(f"Source utilisée: {result.get('source') or 'SerpAPI + OpenAI'}")
+    st.caption(f"Description source: {result.get('description_source', 'unknown')}")
 
     if serpapi_result.get("warning"):
         st.warning(serpapi_result["warning"])
@@ -158,6 +310,7 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "images": result.get("images") or [],
         "links": result.get("links") or [],
         "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI",
+        "description_source": result.get("description_source", "unknown"),
         "message": result.get("message") or ("Barcode detected and enriched." if success else "Barcode detection failed."),
     }
 
@@ -165,6 +318,7 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
 def render_barcode_result(result: dict[str, Any] | None) -> None:
     if not result:
         return
+    result = normalize_product_result(result)
 
     payload = barcode_result_payload(result)
     st.subheader("Final Result")
@@ -188,6 +342,7 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
 
     st.text_input("Product title", payload["product_title"], disabled=True, key="scan_product_title")
     st.text_area("Product description", payload["product_description"], height=120, disabled=True, key="scan_product_description")
+    st.caption(f"Description source: {payload.get('description_source', 'unknown')}")
 
     images = payload["images"][:6]
     if images:
@@ -212,7 +367,8 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
 def process_barcode_input(image_path: str | Path) -> None:
     with st.spinner("Processing barcode..."):
         try:
-            st.session_state.barcode_scan_result = process_barcode_image(image_path)
+            print("STREAMLIT PIPELINE START")
+            st.session_state.barcode_scan_result = normalize_product_result(process_barcode_image(image_path))
         except Exception as exc:
             st.session_state.barcode_scan_result = {
                 "status": "error",
@@ -450,6 +606,7 @@ def render_dashboard(result: dict[str, Any] | None) -> None:
                     use_yolo=use_yolo,
                     progress_callback=progress,
                 )
+                pipeline_result = normalize_product_result(pipeline_result)
             except Exception as exc:
                 pipeline_result = {"status": "error", "message": f"Erreur inattendue du pipeline: {exc}", "warnings": []}
             st.session_state.pipeline_result = pipeline_result
@@ -530,6 +687,7 @@ def render_marketplace(result: dict[str, Any] | None) -> None:
     if not result or result.get("status") != "success":
         st.info("Lance un pipeline réussi pour afficher la fiche marketplace.")
         return
+    result = normalize_product_result(result)
     metadata = result.get("metadata") or {}
     product_data = result.get("product_data") or {}
     st.subheader("Résultat OpenFoodFacts")
@@ -548,14 +706,15 @@ def render_marketplace(result: dict[str, Any] | None) -> None:
     with first:
         st.text_input(
             "Titre produit",
-            result["product_title"],
+            result.get("product_title", ""),
             disabled=True,
         )
         st.text_area(
             "Description produit",
-            result["product_description"],
+            result.get("product_description", ""),
             disabled=True,
         )
+        st.caption(f"Description source: {result.get('description_source', 'unknown')}")
     with second:
         st.text_area("Tags", ", ".join(product_data.get("tags") or []), disabled=True)
         st.text_area("Mots-clés", ", ".join(product_data.get("seo_keywords") or []), disabled=True)
@@ -779,6 +938,9 @@ def main() -> None:
         st.caption("YOLO est optionnel. Sans modèle, WAHA revient automatiquement au scan ZBar de l'image complète.")
 
     result = st.session_state.get("pipeline_result")
+    if result:
+        result = normalize_product_result(result)
+        st.session_state.pipeline_result = result
     tabs = st.tabs(
         [
             "Dashboard",
