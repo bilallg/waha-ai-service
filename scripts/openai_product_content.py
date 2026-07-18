@@ -48,7 +48,17 @@ COMPANY_OWNER_PATTERNS = (
     r"\bInc\.?\b",
 )
 UNCERTAIN_TITLE_CLAIMS = {"low", "sugar", "zero", "bio", "light", "reduced"}
-DESSERT_CONTAINER_WORDS = {"boite", "boîte", "pot", "pack", "bouteille", "canette"}
+DESSERT_CONTAINER_WORDS = {
+    "boite",
+    "boîte",
+    "bouteille",
+    "canette",
+    "creme",
+    "crème",
+    "dessert",
+    "pack",
+    "pot",
+}
 LOWERCASE_TITLE_WORDS = {"au", "aux", "de", "du", "des", "la", "le", "les", "vanille", "chocolat", "fraise"}
 
 
@@ -88,6 +98,23 @@ def _normalize_quantity(text: str) -> str:
     )
 
 
+def _strip_company_owner_text(text: str) -> str:
+    cleaned = _clean(text)
+    for pattern in COMPANY_OWNER_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _title_text_for_tokens(text: str, barcode: str = "", remove_sizes: bool = False) -> str:
+    cleaned = _normalize_quantity(_strip_forbidden_text(text, barcode))
+    cleaned = _strip_company_owner_text(cleaned)
+    cleaned = re.sub(r"[–—_/|]+", " ", cleaned)
+    cleaned = re.sub(r"[,\(\)\[\]]+", " ", cleaned)
+    if remove_sizes:
+        cleaned = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:ml|cl|l|g|kg|mg)\b", " ", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _ascii_key(text: str) -> str:
     replacements = str.maketrans({"é": "e", "è": "e", "ê": "e", "ë": "e", "à": "a", "â": "a", "î": "i", "ï": "i", "ô": "o", "ù": "u", "û": "u", "ç": "c"})
     return text.lower().translate(replacements)
@@ -113,21 +140,26 @@ def clean_product_title(raw_title: str, product_data: dict) -> str:
     """Return a concise Brand + product/flavor + size marketplace title."""
     if not isinstance(product_data, dict):
         product_data = {}
-    text = _normalize_quantity(_strip_forbidden_text(raw_title, _clean(product_data.get("barcode"))))
-    text = re.sub(r"[–—_/|]+", " ", text)
-    text = re.sub(r"[,\(\)\[\]]+", " ", text)
-    for pattern in COMPANY_OWNER_PATTERNS:
-        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    barcode = _clean(product_data.get("barcode"))
+    text = _title_text_for_tokens(raw_title, barcode)
 
     sizes = _size_tokens(" ".join([text, _clean(product_data.get("quantity"))]))
     preferred_size = _preferred_size(sizes)
-    text_without_sizes = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:ml|cl|l|g|kg|mg)\b", " ", text, flags=re.IGNORECASE)
+    text_without_sizes = _title_text_for_tokens(text, barcode, remove_sizes=True)
     tokens = _word_tokens(text_without_sizes)
 
-    brand = _clean(product_data.get("brand"))
-    product_name = _clean(product_data.get("product_name") or product_data.get("title") or product_data.get("name"))
+    brand = _title_text_for_tokens(product_data.get("brand", ""), barcode, remove_sizes=True)
+    product_name = _title_text_for_tokens(
+        product_data.get("product_name") or product_data.get("title") or product_data.get("name"),
+        barcode,
+        remove_sizes=True,
+    )
     brand_tokens = _word_tokens(brand)
     product_tokens = _word_tokens(product_name)
+    allowed_claims = {
+        _ascii_key(token)
+        for token in _word_tokens(_title_text_for_tokens(product_data.get("official_product_name", ""), barcode))
+    }
 
     if not brand_tokens and tokens:
         brand_tokens = [tokens[0]]
@@ -150,7 +182,7 @@ def clean_product_title(raw_title: str, product_data: dict) -> str:
         key = _ascii_key(token)
         if key in seen or key in DESSERT_CONTAINER_WORDS:
             continue
-        if key in UNCERTAIN_TITLE_CLAIMS and key not in {_ascii_key(item) for item in product_tokens}:
+        if key in UNCERTAIN_TITLE_CLAIMS and key not in allowed_claims:
             continue
         if key in LOWERCASE_TITLE_WORDS:
             token = token.lower()
@@ -161,7 +193,7 @@ def clean_product_title(raw_title: str, product_data: dict) -> str:
             key = _ascii_key(token)
             if key in seen or key in DESSERT_CONTAINER_WORDS:
                 continue
-            if key in UNCERTAIN_TITLE_CLAIMS and " ".join(token.lower() for token in tokens) != " ".join(token.lower() for token in product_tokens):
+            if key in UNCERTAIN_TITLE_CLAIMS and key not in allowed_claims:
                 continue
             if key in LOWERCASE_TITLE_WORDS:
                 token = token.lower()
@@ -257,6 +289,15 @@ def _fallback_content(product_data: dict[str, Any], metadata: dict[str, str]) ->
     if not isinstance(product_data, dict):
         product_data = {}
     product_title = clean_product_title(_fallback_title(product_data, metadata), {**product_data, **metadata})
+    title_key = _ascii_key(product_title)
+    if "sprite" in title_key:
+        return {
+            "product_title": product_title,
+            "product_description": (
+                f"{product_title} est une boisson gazeuse rafraîchissante au goût citron-citron vert. "
+                "Elle convient aux snacks, cafés, restaurants et points de vente."
+            ),
+        }
     return {
         "product_title": product_title,
         "product_description": (
@@ -289,7 +330,9 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
     metadata = _useful_openai_metadata(product_data)
     fallback = _fallback_content(product_data, metadata)
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
     LOGGER.info("OPENAI_API_KEY present: %s", bool(api_key))
+    LOGGER.info("OPENAI_MODEL: %s", model)
     if not api_key:
         LOGGER.warning("OPENAI DESCRIPTION FAILED: OPENAI_API_KEY missing")
         LOGGER.info("FINAL DESCRIPTION SOURCE: clean_fallback")
@@ -297,7 +340,6 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
         LOGGER.info("Final product_description: %s", fallback["product_description"])
         return {**fallback, "description_source": "clean_fallback"}
 
-    model = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
     try:
         from openai import OpenAI
 
