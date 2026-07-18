@@ -333,6 +333,7 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
     model = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
     LOGGER.info("OPENAI_API_KEY present: %s", bool(api_key))
     LOGGER.info("OPENAI_MODEL: %s", model)
+    LOGGER.info("CALLING OPENAI PRODUCT DESCRIPTION")
     if not api_key:
         LOGGER.warning("OPENAI DESCRIPTION FAILED: OPENAI_API_KEY missing")
         LOGGER.info("FINAL DESCRIPTION SOURCE: clean_fallback")
@@ -343,7 +344,6 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
     try:
         from openai import OpenAI
 
-        LOGGER.info("CALLING OPENAI PRODUCT DESCRIPTION")
         client = OpenAI(api_key=api_key, timeout=20.0)
         response = client.responses.create(
             model=model,

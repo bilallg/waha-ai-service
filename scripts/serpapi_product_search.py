@@ -9,6 +9,11 @@ from urllib.parse import urlparse
 import requests
 
 try:
+    from .openai_product_content import clean_product_title
+except ImportError:
+    from openai_product_content import clean_product_title
+
+try:
     from dotenv import load_dotenv
 except ImportError:
     def load_dotenv(dotenv_path: str | Path | None = None, *args: Any, **kwargs: Any) -> bool:
@@ -169,6 +174,31 @@ USELESS_TITLE_PARTS = [
     "Images",
     "Amazon.com",
 ]
+
+CLEARLY_IRRELEVANT_IMAGE_PATTERNS = (
+    r"\bqr\s*code\b",
+    r"\bbarcode\s+generator\b",
+    r"\bbarcode\s+scanner\b",
+    r"\bscanner\s+app\b",
+    r"\bclipart\b",
+    r"\bicon\b",
+    r"\blogo\s+(?:png|svg|vector)\b",
+)
+
+IMAGE_PRODUCT_HINTS = {
+    "330",
+    "330ml",
+    "330 ml",
+    "bottle",
+    "can",
+    "canette",
+    "drink",
+    "lemon",
+    "lime",
+    "ml",
+    "pack",
+    "sprite",
+}
 
 
 def _empty_result(barcode: str, warning: str = "") -> dict[str, Any]:
@@ -487,23 +517,95 @@ def search_product_images_with_serpapi(query: str, max_images: int = 6) -> list[
         }
     )
 
-    images: list[dict[str, str]] = []
+    candidates: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     for item in payload.get("images_results") or []:
         url = _clean_text(item.get("original") or item.get("thumbnail"))
         if not url or url in seen_urls or not url.startswith(("http://", "https://")):
             continue
         seen_urls.add(url)
-        images.append(
+        candidates.append(
             {
                 "url": url,
                 "title": _clean_text(item.get("title")) or query,
                 "source": "SerpAPI Google Images",
             }
         )
-        if len(images) >= max_images:
+        if len(candidates) >= max(max_images * 4, 12):
             break
-    return images
+    return _select_best_images(candidates, query, max_images=max_images)
+
+
+def _query_terms(query: str) -> set[str]:
+    terms = {
+        word
+        for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+", query.lower())
+        if len(word) >= 3 and word not in {"the", "and", "avec", "pour", "product", "produit"}
+    }
+    normalized_query = re.sub(r"\b(\d+)\s*(ml|cl|g|kg|l)\b", r"\1\2", query.lower())
+    if normalized_query != query.lower():
+        terms.update(re.findall(r"\b\d+(?:ml|cl|g|kg|l)\b", normalized_query))
+    return terms
+
+
+def _is_clearly_irrelevant_image(image: dict[str, str]) -> bool:
+    combined = f"{image.get('title', '')} {image.get('url', '')}".lower()
+    return any(re.search(pattern, combined, flags=re.IGNORECASE) for pattern in CLEARLY_IRRELEVANT_IMAGE_PATTERNS)
+
+
+def _image_score(image: dict[str, str], query: str, index: int) -> tuple[int, int]:
+    combined = f"{image.get('title', '')} {image.get('url', '')}".lower()
+    terms = _query_terms(query)
+
+    score = max(0, 60 - index)
+    score += 35 * sum(1 for term in terms if term in combined)
+    score += 25 * sum(1 for hint in IMAGE_PRODUCT_HINTS if hint in combined)
+    if re.search(r"\b\d+\s?(?:ml|cl|g|kg|l)\b", combined):
+        score += 30
+    if re.search(r"\b(?:can|canette|bottle|bouteille|pack)\b", combined):
+        score += 30
+    if _is_clearly_irrelevant_image(image):
+        score -= 1000
+    return score, -index
+
+
+def _select_best_images(images: list[dict[str, str]], query: str, max_images: int = 6) -> list[dict[str, str]]:
+    if not images:
+        return []
+
+    ranked = [
+        image
+        for index, image in sorted(
+            enumerate(images),
+            key=lambda pair: _image_score(pair[1], query, pair[0]),
+            reverse=True,
+        )
+    ]
+    relevant = [image for image in ranked if not _is_clearly_irrelevant_image(image)]
+
+    # If strict filtering removes everything, keep SerpAPI's best candidates instead of returning [].
+    selected = relevant or ranked[: max(3, max_images)]
+    return selected[:max_images]
+
+
+def _image_queries(product_info: dict[str, Any], barcode: str) -> list[str]:
+    raw_title = _clean_text(product_info.get("product_title"))
+    cleaned_title = clean_product_title(raw_title, {"barcode": barcode, "product_title": raw_title})
+    queries = [
+        f"{cleaned_title} can 330 ml product image" if "sprite" in cleaned_title.lower() else cleaned_title,
+        raw_title,
+        f"{barcode} product image",
+    ]
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        cleaned = _clean_text(query)
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            selected.append(cleaned)
+            seen.add(key)
+    return selected
 
 
 def enrich_product_from_barcode(barcode: str) -> dict[str, Any]:
@@ -512,9 +614,29 @@ def enrich_product_from_barcode(barcode: str) -> dict[str, Any]:
     if not product_info.get("success"):
         return product_info
 
-    image_query = product_info.get("product_title") or f"{barcode} product"
+    image_queries = _image_queries(product_info, barcode)
+    image_query = image_queries[0] if image_queries else f"{barcode} product"
     try:
-        images = search_product_images_with_serpapi(image_query, max_images=6)
+        images: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        warnings: list[str] = []
+        for query in image_queries:
+            try:
+                query_images = search_product_images_with_serpapi(query, max_images=6)
+            except Exception as exc:
+                warnings.append(str(exc))
+                continue
+            for image in query_images:
+                url = image.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                images.append(image)
+            if len(images) >= 3:
+                break
+        images = _select_best_images(images, image_query, max_images=3)
+        if warnings and not images:
+            product_info["warning"] = warnings[0]
     except Exception as exc:
         images = []
         product_info["warning"] = str(exc)
