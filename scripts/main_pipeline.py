@@ -18,7 +18,6 @@ try:
     from .improve_images import create_product_video, enhance_image, improve_images_batch
     from .expiration_date_ocr import detect_expiration_date
     from .export_marketplace import export_marketplace_package
-    from .product_description_generator import generate_clean_product_description, save_product_data
     from .product_lookup import lookup_product
     from .scan_qr_code import scan_code
     from .barcode_decoder import decode_barcode
@@ -31,7 +30,6 @@ except ImportError:
     from improve_images import create_product_video, enhance_image, improve_images_batch
     from expiration_date_ocr import detect_expiration_date
     from export_marketplace import export_marketplace_package
-    from product_description_generator import generate_clean_product_description, save_product_data
     from product_lookup import lookup_product
     from scan_qr_code import scan_code
     from barcode_decoder import decode_barcode
@@ -155,14 +153,6 @@ def _normalize_serpapi_description(
     product_lookup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     original_description = _remove_price_text(str(serpapi_result.get("product_description") or "").strip())
-    fallback_description = generate_clean_product_description(
-        barcode=barcode,
-        barcode_type=barcode_type,
-        product_title=serpapi_result.get("product_title", ""),
-        old_description=original_description,
-        links=serpapi_result.get("links") or [],
-        source=serpapi_result.get("source", ""),
-    )
     lookup = product_lookup or {}
     content = generate_openai_product_content(
         {
@@ -177,7 +167,6 @@ def _normalize_serpapi_description(
             "raw_description": original_description or lookup.get("description", ""),
             "links": serpapi_result.get("links") or [],
             "source": serpapi_result.get("source", ""),
-            "description": fallback_description,
         }
     )
     normalized = {**serpapi_result, **content}
@@ -218,6 +207,57 @@ def _seller_managed_product_fields(product: dict[str, Any]) -> dict[str, Any]:
     sanitized.pop("product_category", None)
     sanitized.pop("price", None)
     return sanitized
+
+
+def _slug_words(*values: str, limit: int = 10) -> list[str]:
+    words: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for word in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+", str(value or "").lower()):
+            if len(word) < 2 or word in seen:
+                continue
+            seen.add(word)
+            words.append(word)
+            if len(words) >= limit:
+                return words
+    return words
+
+
+def _build_product_data(
+    product_lookup: dict[str, Any],
+    content: dict[str, Any],
+    barcode_metadata: dict[str, Any],
+    expiration_result: dict[str, Any],
+) -> dict[str, Any]:
+    product_title = str(content.get("product_title") or "").strip()
+    product_description = str(content.get("product_description") or "").strip()
+    tags = _slug_words(product_title, product_lookup.get("brand", ""), product_lookup.get("quantity", ""))
+    if "marketplace" not in tags:
+        tags.append("marketplace")
+    return {
+        "barcode": product_lookup.get("barcode", ""),
+        "title": product_title,
+        "brand": product_lookup.get("brand", ""),
+        "source": product_lookup.get("source", "fallback"),
+        "product_description": product_description,
+        "expiration_date": expiration_result.get("expiration_date"),
+        "expiration_found": bool(expiration_result.get("expiration_found")),
+        "seo_title": product_title,
+        "short_description": product_description,
+        "long_description": product_description,
+        "bullet_points": [],
+        "tags": tags,
+        "seo_keywords": tags[:],
+        "quantity": product_lookup.get("quantity", ""),
+        "image_url": product_lookup.get("image_url", ""),
+        "barcode_detection_method": barcode_metadata["barcode_detection_method"],
+        "barcode_decoding_method": barcode_metadata["barcode_decoding_method"],
+        "yolo_boxes": barcode_metadata["yolo_boxes"],
+        "yolo_confidence": barcode_metadata["yolo_confidence"],
+        "yolo_annotated_image": barcode_metadata["yolo_annotated_image"],
+        "yolo_inference_time_ms": barcode_metadata["yolo_inference_time_ms"],
+        "barcode_decode_success": barcode_metadata["barcode_decode_success"],
+    }
 
 
 def process_barcode_image(image_file: Any) -> dict[str, Any]:
@@ -401,6 +441,8 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         barcode_type=barcode_metadata.get("barcode_type", ""),
         product_lookup=product_lookup,
     )
+    LOGGER.info("Final product_title: %s", serpapi_result.get("product_title", ""))
+    LOGGER.info("Final product_description: %s", serpapi_result.get("product_description", ""))
     expiration_result = _safe_detect_expiration_date(image_path)
 
     return {
@@ -690,6 +732,8 @@ def run_pipeline(
         barcode_type=barcode_metadata.get("barcode_type", ""),
         product_lookup=product_lookup,
     )
+    LOGGER.info("Final product_title: %s", serpapi_result.get("product_title", ""))
+    LOGGER.info("Final product_description: %s", serpapi_result.get("product_description", ""))
 
     original_processed = save_original_image(input_path, product_dirs.processed_original)
 
@@ -783,41 +827,18 @@ def run_pipeline(
     _notify(progress_callback, "Generation de la fiche produit...")
     export_dir = EXPORTS_DIR / product_folder
     product_data_path = export_dir / "product_data.json"
-    if product_lookup.get("source") == "fallback" and serpapi_result.get("product_title"):
-        product_lookup["title"] = serpapi_result["product_title"]
-    elif serpapi_result.get("product_title"):
-        product_lookup["title"] = serpapi_result["product_title"]
-    product_lookup["description"] = serpapi_result.get("product_description") or product_lookup.get("description", "")
+    product_lookup["title"] = serpapi_result.get("product_title") or product_lookup.get("title", "")
+    product_lookup["description"] = serpapi_result.get("product_description") or ""
     product_lookup["links"] = serpapi_result.get("links") or []
     product_lookup["barcode_type"] = barcode_metadata.get("barcode_type", "")
     product_lookup.update(expiration_result)
-    product_data = save_product_data(product_lookup, product_data_path)
-    product_data.update(
-        {
-            "title": serpapi_result.get("product_title", product_data.get("title", "")),
-            "product_description": serpapi_result.get("product_description", product_data.get("product_description", "")),
-            "seo_title": serpapi_result.get("product_title", product_data.get("seo_title", "")),
-            "short_description": serpapi_result.get(
-                "product_description",
-                product_data.get("short_description", ""),
-            ),
-            "long_description": serpapi_result.get(
-                "product_description",
-                product_data.get("long_description", ""),
-            ),
-        }
+    product_data = _build_product_data(
+        product_lookup=product_lookup,
+        content=serpapi_result,
+        barcode_metadata=barcode_metadata,
+        expiration_result=expiration_result,
     )
-    product_data.update(
-        {
-            "barcode_detection_method": barcode_metadata["barcode_detection_method"],
-            "barcode_decoding_method": barcode_metadata["barcode_decoding_method"],
-            "yolo_boxes": barcode_metadata["yolo_boxes"],
-            "yolo_confidence": barcode_metadata["yolo_confidence"],
-            "yolo_annotated_image": barcode_metadata["yolo_annotated_image"],
-            "yolo_inference_time_ms": barcode_metadata["yolo_inference_time_ms"],
-            "barcode_decode_success": barcode_metadata["barcode_decode_success"],
-        }
-    )
+    product_data_path.parent.mkdir(parents=True, exist_ok=True)
     product_data_path.write_text(
         json.dumps(product_data, indent=2, ensure_ascii=False),
         encoding="utf-8",

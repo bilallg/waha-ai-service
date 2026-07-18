@@ -113,12 +113,8 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
             "SERPAPI_API_KEY manquante. Le barcode est détecté, mais les informations produit/images web ne peuvent pas être récupérées."
         )
 
-    product_title = result.get("product_title") or serpapi_result.get("product_title") or f"Produit détecté - {barcode}"
-    product_description = (
-        result.get("product_description")
-        or serpapi_result.get("product_description")
-        or "Description produit web non disponible."
-    )
+    product_title = result["product_title"]
+    product_description = result["product_description"]
     st.text_input("Product title", product_title, disabled=True)
     st.text_area("Product description", product_description, height=130, disabled=True)
     st.caption(f"Source utilisée: {serpapi_result.get('source') or 'SerpAPI'}")
@@ -552,12 +548,12 @@ def render_marketplace(result: dict[str, Any] | None) -> None:
     with first:
         st.text_input(
             "Titre produit",
-            result.get("product_title") or product_data.get("title", ""),
+            result["product_title"],
             disabled=True,
         )
         st.text_area(
             "Description produit",
-            result.get("product_description") or product_data.get("product_description", ""),
+            result["product_description"],
             disabled=True,
         )
     with second:
