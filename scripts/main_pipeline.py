@@ -21,7 +21,7 @@ try:
     from .product_lookup import lookup_product
     from .scan_qr_code import scan_code
     from .barcode_decoder import decode_barcode
-    from .openai_product_content import generate_openai_product_content
+    from .openai_product_content import clean_product_title, generate_openai_product_content
     from .serpapi_product_search import enrich_product_from_barcode
     from .yolo_barcode_detector import detect_barcodes
 except ImportError:
@@ -33,7 +33,7 @@ except ImportError:
     from product_lookup import lookup_product
     from scan_qr_code import scan_code
     from barcode_decoder import decode_barcode
-    from openai_product_content import generate_openai_product_content
+    from openai_product_content import clean_product_title, generate_openai_product_content
     from serpapi_product_search import enrich_product_from_barcode
     from yolo_barcode_detector import detect_barcodes
 
@@ -171,6 +171,7 @@ def _normalize_serpapi_description(
             "source": serpapi_result.get("source", ""),
         }
     )
+    content["product_title"] = clean_product_title(content.get("product_title", ""), {**lookup, **content})
     normalized = {**serpapi_result, **content}
     return normalized
 

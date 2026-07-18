@@ -39,6 +39,17 @@ FORBIDDEN_TITLE_PATTERNS = (
     r"\bis a product identified with\b",
     r"\bfrom available product\s+data\b",
 )
+COMPANY_OWNER_PATTERNS = (
+    r"\bThe Coca[-\s]?Cola Company\b",
+    r"\bCoca[-\s]?Cola Company\b",
+    r"\bCompany\b",
+    r"\bLLC\b",
+    r"\bLtd\.?\b",
+    r"\bInc\.?\b",
+)
+UNCERTAIN_TITLE_CLAIMS = {"low", "sugar", "zero", "bio", "light", "reduced"}
+DESSERT_CONTAINER_WORDS = {"boite", "boîte", "pot", "pack", "bouteille", "canette"}
+LOWERCASE_TITLE_WORDS = {"au", "aux", "de", "du", "des", "la", "le", "les", "vanille", "chocolat", "fraise"}
 
 
 def _clean(value: Any) -> str:
@@ -68,7 +79,97 @@ def _strip_forbidden_text(text: str, barcode: str = "") -> str:
 
 
 def _normalize_quantity(text: str) -> str:
-    return re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", text, flags=re.IGNORECASE)
+    return re.sub(
+        r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b",
+        lambda match: f"{match.group(1)} {match.group(2).lower()}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+
+def _ascii_key(text: str) -> str:
+    replacements = str.maketrans({"é": "e", "è": "e", "ê": "e", "ë": "e", "à": "a", "â": "a", "î": "i", "ï": "i", "ô": "o", "ù": "u", "û": "u", "ç": "c"})
+    return text.lower().translate(replacements)
+
+
+def _word_tokens(text: str) -> list[str]:
+    return re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+(?:-[A-Za-zÀ-ÖØ-öø-ÿ0-9]+)?", text)
+
+
+def _size_tokens(text: str) -> list[str]:
+    return re.findall(r"\b\d+(?:[.,]\d+)?\s*(?:ml|cl|l|g|kg|mg)\b", _normalize_quantity(text), flags=re.IGNORECASE)
+
+
+def _preferred_size(sizes: list[str]) -> str:
+    if not sizes:
+        return ""
+    normalized = [_normalize_quantity(size).lower() for size in sizes]
+    ml_sizes = [size for size in normalized if size.endswith(" ml")]
+    return ml_sizes[0] if ml_sizes else normalized[0]
+
+
+def clean_product_title(raw_title: str, product_data: dict) -> str:
+    """Return a concise Brand + product/flavor + size marketplace title."""
+    text = _normalize_quantity(_strip_forbidden_text(raw_title, _clean(product_data.get("barcode"))))
+    text = re.sub(r"[–—_/|]+", " ", text)
+    text = re.sub(r"[,\(\)\[\]]+", " ", text)
+    for pattern in COMPANY_OWNER_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+
+    sizes = _size_tokens(" ".join([text, _clean(product_data.get("quantity"))]))
+    preferred_size = _preferred_size(sizes)
+    text_without_sizes = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:ml|cl|l|g|kg|mg)\b", " ", text, flags=re.IGNORECASE)
+    tokens = _word_tokens(text_without_sizes)
+
+    brand = _clean(product_data.get("brand"))
+    product_name = _clean(product_data.get("product_name") or product_data.get("title") or product_data.get("name"))
+    brand_tokens = _word_tokens(brand)
+    product_tokens = _word_tokens(product_name)
+
+    if not brand_tokens and tokens:
+        brand_tokens = [tokens[0]]
+
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    def add_token(token: str) -> None:
+        key = _ascii_key(token)
+        if not key or key in seen:
+            return
+        selected.append(token)
+        seen.add(key)
+
+    for token in brand_tokens:
+        add_token(token)
+
+    candidate_tokens = product_tokens or tokens
+    for token in candidate_tokens:
+        key = _ascii_key(token)
+        if key in seen or key in DESSERT_CONTAINER_WORDS:
+            continue
+        if key in UNCERTAIN_TITLE_CLAIMS and key not in {_ascii_key(item) for item in product_tokens}:
+            continue
+        if key in LOWERCASE_TITLE_WORDS:
+            token = token.lower()
+        add_token(token)
+
+    if brand_tokens and _ascii_key(" ".join(selected)) == _ascii_key(" ".join(brand_tokens)):
+        for token in tokens:
+            key = _ascii_key(token)
+            if key in seen or key in DESSERT_CONTAINER_WORDS:
+                continue
+            if key in UNCERTAIN_TITLE_CLAIMS and " ".join(token.lower() for token in tokens) != " ".join(token.lower() for token in product_tokens):
+                continue
+            if key in LOWERCASE_TITLE_WORDS:
+                token = token.lower()
+            add_token(token)
+
+    cleaned_title = " ".join(selected).strip()
+    if preferred_size:
+        cleaned_title = f"{cleaned_title} {preferred_size}".strip()
+    cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip(" -|:;,.")
+    return cleaned_title or _normalize_quantity(text).strip() or "Produit"
 
 
 def _limit_to_two_sentences(text: str) -> str:
@@ -130,6 +231,7 @@ def _useful_openai_metadata(product_data: dict[str, Any]) -> dict[str, str]:
 
 def _fallback_title(product_data: dict[str, Any], metadata: dict[str, str]) -> str:
     barcode = _clean(product_data.get("barcode"))
+    title_context = {**product_data, **metadata}
     parts = _dedupe_parts(
         [
             metadata.get("brand", ""),
@@ -138,17 +240,17 @@ def _fallback_title(product_data: dict[str, Any], metadata: dict[str, str]) -> s
         ]
     )
     if parts:
-        return " ".join(parts)
+        return clean_product_title(" ".join(parts), title_context)
 
     source_title = metadata.get("product_title") or _first_clean(product_data, ("title",))
     if source_title and not _title_is_generic(source_title, barcode):
-        return _strip_forbidden_text(source_title, barcode)
+        return clean_product_title(source_title, title_context)
 
     return "Produit"
 
 
 def _fallback_content(product_data: dict[str, Any], metadata: dict[str, str]) -> dict[str, str]:
-    product_title = _fallback_title(product_data, metadata)
+    product_title = clean_product_title(_fallback_title(product_data, metadata), {**product_data, **metadata})
     return {
         "product_title": product_title,
         "product_description": (
@@ -160,7 +262,7 @@ def _fallback_content(product_data: dict[str, Any], metadata: dict[str, str]) ->
 
 def _validate_content(content: dict[str, Any], product_data: dict[str, Any]) -> dict[str, str]:
     barcode = _clean(product_data.get("barcode"))
-    product_title = _strip_forbidden_text(content.get("product_title", ""), barcode)
+    product_title = clean_product_title(content.get("product_title", ""), product_data)
     product_description = _limit_to_two_sentences(_strip_forbidden_text(content.get("product_description", ""), barcode))
     if not product_title or not product_description:
         raise ValueError("OpenAI response missing product_title or product_description")

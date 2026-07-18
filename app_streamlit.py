@@ -47,7 +47,7 @@ from main_pipeline import (
     process_barcode_image,
     run_pipeline,
 )
-from scripts.openai_product_content import generate_openai_product_content
+from scripts.openai_product_content import clean_product_title, generate_openai_product_content
 
 
 st.set_page_config(page_title="WAHA Platform", page_icon="🛍️", layout="wide")
@@ -87,11 +87,7 @@ def is_bad_description(text: str) -> bool:
 
 
 def _clean_fallback_title(title: str) -> str:
-    cleaned = re.sub(r"\b\d{8,14}\b", "", str(title or "Produit détecté"))
-    cleaned = re.sub(r"(?i)\b(?:EAN\s*13|EAN\s*[-/]\s*13|EAN13|barcode|code[-\s]?barres?)\b", "", cleaned)
-    cleaned = re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
-    return cleaned or "Produit détecté"
+    return clean_product_title(title or "Produit détecté", {})
 
 
 def _clean_fallback_description(product_title: str) -> str:
@@ -126,7 +122,7 @@ def normalize_product_result(result: dict) -> dict:
         or result.get("name")
         or "Produit détecté"
     )
-    product_title = _clean_fallback_title(product_title)
+    product_title = clean_product_title(product_title, _product_data_for_openai(result, product_title, ""))
     product_description = (
         result.get("product_description")
         or result.get("description")
@@ -159,7 +155,7 @@ def normalize_product_result(result: dict) -> dict:
             openai_result = generate_openai_product_content(product_data)
             if openai_result.get("description_source") != "OpenAI":
                 raise RuntimeError("OpenAI helper returned clean fallback")
-            openai_title = openai_result.get("product_title", product_title)
+            openai_title = clean_product_title(openai_result.get("product_title", product_title), product_data)
             openai_description = openai_result.get("product_description") or clean_fallback
             if is_bad_description(openai_description):
                 raise ValueError("OpenAI description contains forbidden raw metadata")

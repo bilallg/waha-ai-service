@@ -34,6 +34,7 @@ LOGGER = logging.getLogger(__name__)
 
 from expiration_date_ocr import detect_expiration_date
 from main_pipeline import process_barcode_image
+from openai_product_content import clean_product_title
 
 
 app = FastAPI(
@@ -81,6 +82,15 @@ def _image_size(path: str | Path) -> tuple[int, int] | None:
 
 def _shape_response(result: dict) -> dict:
     success = result.get("status") == "success" and bool(result.get("barcode"))
+    product_title = clean_product_title(
+        result.get("product_title", ""),
+        {
+            **(result.get("product_lookup") or {}),
+            "barcode": result.get("barcode", ""),
+            "quantity": (result.get("product_lookup") or {}).get("quantity", ""),
+            "product_title": result.get("product_title", ""),
+        },
+    )
     message = (
         "Barcode detected and enriched."
         if success and result.get("expiration_found")
@@ -93,7 +103,7 @@ def _shape_response(result: dict) -> dict:
         "success": success,
         "barcode": result.get("barcode", ""),
         "barcode_type": result.get("barcode_type", ""),
-        "product_title": result.get("product_title", ""),
+        "product_title": product_title,
         "product_description": result.get("product_description", ""),
         "expiration_date": result.get("expiration_date"),
         "expiration_text": result.get("expiration_text"),

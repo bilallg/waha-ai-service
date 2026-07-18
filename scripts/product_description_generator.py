@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .openai_product_content import generate_openai_product_content
+    from .openai_product_content import clean_product_title, generate_openai_product_content
 except ImportError:
-    from openai_product_content import generate_openai_product_content
+    from openai_product_content import clean_product_title, generate_openai_product_content
 
 
 def _clean(value: object, fallback: str = "") -> str:
@@ -17,13 +17,7 @@ def _clean(value: object, fallback: str = "") -> str:
 
 
 def _clean_title(title: str, barcode: str = "") -> str:
-    cleaned = _clean(title)
-    if barcode:
-        cleaned = re.sub(rf"\b{re.escape(barcode)}\b", "", cleaned)
-    cleaned = re.sub(r"(?i)\b(?:EAN\s*13|EAN13|barcode|code[-\s]?barres?)\b", "", cleaned)
-    cleaned = re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
-    return cleaned or "Produit"
+    return clean_product_title(title, {"barcode": barcode})
 
 
 def _fallback_description(title: str) -> str:
