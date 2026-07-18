@@ -111,6 +111,8 @@ def _preferred_size(sizes: list[str]) -> str:
 
 def clean_product_title(raw_title: str, product_data: dict) -> str:
     """Return a concise Brand + product/flavor + size marketplace title."""
+    if not isinstance(product_data, dict):
+        product_data = {}
     text = _normalize_quantity(_strip_forbidden_text(raw_title, _clean(product_data.get("barcode"))))
     text = re.sub(r"[–—_/|]+", " ", text)
     text = re.sub(r"[,\(\)\[\]]+", " ", text)
@@ -230,6 +232,8 @@ def _useful_openai_metadata(product_data: dict[str, Any]) -> dict[str, str]:
 
 
 def _fallback_title(product_data: dict[str, Any], metadata: dict[str, str]) -> str:
+    if not isinstance(product_data, dict):
+        product_data = {}
     barcode = _clean(product_data.get("barcode"))
     title_context = {**product_data, **metadata}
     parts = _dedupe_parts(
@@ -250,6 +254,8 @@ def _fallback_title(product_data: dict[str, Any], metadata: dict[str, str]) -> s
 
 
 def _fallback_content(product_data: dict[str, Any], metadata: dict[str, str]) -> dict[str, str]:
+    if not isinstance(product_data, dict):
+        product_data = {}
     product_title = clean_product_title(_fallback_title(product_data, metadata), {**product_data, **metadata})
     return {
         "product_title": product_title,
@@ -261,6 +267,10 @@ def _fallback_content(product_data: dict[str, Any], metadata: dict[str, str]) ->
 
 
 def _validate_content(content: dict[str, Any], product_data: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(product_data, dict):
+        product_data = {}
+    if not isinstance(content, dict):
+        content = {}
     barcode = _clean(product_data.get("barcode"))
     product_title = clean_product_title(content.get("product_title", ""), product_data)
     product_description = _limit_to_two_sentences(_strip_forbidden_text(content.get("product_description", ""), barcode))
@@ -274,6 +284,8 @@ def _validate_content(content: dict[str, Any], product_data: dict[str, Any]) -> 
 
 def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, str]:
     """Generate clean French marketplace title/description, with a local fallback."""
+    if not isinstance(product_data, dict):
+        product_data = {}
     metadata = _useful_openai_metadata(product_data)
     fallback = _fallback_content(product_data, metadata)
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -283,14 +295,14 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
         LOGGER.info("FINAL DESCRIPTION SOURCE: clean_fallback")
         LOGGER.info("Final product_title: %s", fallback["product_title"])
         LOGGER.info("Final product_description: %s", fallback["product_description"])
-        return fallback
+        return {**fallback, "description_source": "clean_fallback"}
 
     model = os.getenv("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
     try:
         from openai import OpenAI
 
         LOGGER.info("CALLING OPENAI PRODUCT DESCRIPTION")
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, timeout=20.0)
         response = client.responses.create(
             model=model,
             instructions=(
@@ -329,10 +341,10 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
         LOGGER.info("FINAL DESCRIPTION SOURCE: OpenAI")
         LOGGER.info("Final product_title: %s", generated["product_title"])
         LOGGER.info("Final product_description: %s", generated["product_description"])
-        return generated
+        return {**generated, "description_source": "OpenAI"}
     except Exception as exc:
         LOGGER.warning("OPENAI DESCRIPTION FAILED: %s", exc, exc_info=True)
         LOGGER.info("FINAL DESCRIPTION SOURCE: clean_fallback")
         LOGGER.info("Final product_title: %s", fallback["product_title"])
         LOGGER.info("Final product_description: %s", fallback["product_description"])
-        return fallback
+        return {**fallback, "description_source": "clean_fallback"}

@@ -5,6 +5,7 @@ import secrets
 import shutil
 import sys
 import logging
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +22,7 @@ UPLOADS_DIR = PROJECT_ROOT / "output" / "uploads"
 MODEL_PATH = PROJECT_ROOT / "models" / "barcode_yolov8.pt"
 SERVICE_VERSION = "1.0.1"
 BUILD_TIMESTAMP = os.getenv("RENDER_GIT_COMMIT", "").strip() or datetime.now(timezone.utc).isoformat(timespec="seconds")
+MAX_UPLOAD_IMAGE_SIDE = 1600
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -80,6 +82,46 @@ def _image_size(path: str | Path) -> tuple[int, int] | None:
         return None
 
 
+def _short_error(exc: Exception, max_length: int = 240) -> str:
+    error = f"{type(exc).__name__}: {exc}".strip()
+    return error[:max_length]
+
+
+def _barcode_internal_error(exc: Exception) -> JSONResponse:
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "barcode": "",
+            "barcode_type": "",
+            "product_title": "",
+            "product_description": "",
+            "expiration_date": None,
+            "expiration_text": None,
+            "expiration_found": False,
+            "images": [],
+            "links": [],
+            "source": "YOLOv8 + ZBar + SerpAPI + OpenAI",
+            "message": "Internal error during barcode detection",
+            "error": _short_error(exc),
+        },
+    )
+
+
+def _resize_large_image(path: str | Path, max_side: int = MAX_UPLOAD_IMAGE_SIDE) -> None:
+    with Image.open(path) as image:
+        image.load()
+        if max(image.size) <= max_side:
+            return
+
+        image.thumbnail((max_side, max_side))
+        save_format = "PNG" if image.mode in {"RGBA", "LA"} else "JPEG"
+        if save_format == "JPEG":
+            image = image.convert("RGB")
+        image.save(path, save_format, quality=90, optimize=True)
+
+
 def _shape_response(result: dict) -> dict:
     success = result.get("status") == "success" and bool(result.get("barcode"))
     product_title = clean_product_title(
@@ -110,7 +152,7 @@ def _shape_response(result: dict) -> dict:
         "expiration_found": bool(result.get("expiration_found")),
         "images": result.get("images") or [],
         "links": result.get("links") or [],
-        "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI",
+        "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI + OpenAI",
         "message": message,
     }
 
@@ -134,17 +176,23 @@ async def detect_barcode(
     file: UploadFile = File(...),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> JSONResponse:
-    if not _is_authorized(x_api_key):
-        return _unauthorized()
-
-    upload_path = _safe_upload_path(file.filename)
+    upload_path: Path | None = None
     try:
+        LOGGER.info("REQUEST RECEIVED endpoint=/ai/barcode/detect filename=%s", getattr(file, "filename", ""))
+        if not _is_authorized(x_api_key):
+            return _unauthorized()
+
+        upload_path = _safe_upload_path(file.filename)
         with upload_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        LOGGER.info("FILE READ OK path=%s size_bytes=%s", upload_path, upload_path.stat().st_size if upload_path.exists() else 0)
+        _resize_large_image(upload_path)
         image_size = _image_size(upload_path)
+        LOGGER.info("IMAGE DECODE OK")
         LOGGER.info("IMAGE RECEIVED endpoint=/ai/barcode/detect filename=%s path=%s size_bytes=%s", file.filename, upload_path, upload_path.stat().st_size if upload_path.exists() else 0)
         LOGGER.info("IMAGE SIZE=%s", image_size)
 
+        LOGGER.info("BARCODE DETECTION START")
         result = process_barcode_image(upload_path)
         LOGGER.info(
             "Barcode result success=%s yolo_detections=%s pyzbar_decoded_count=%s barcode=%s",
@@ -158,28 +206,17 @@ async def detect_barcode(
         LOGGER.info("CROP PYZBAR COUNT=%s", result.get("crop_pyzbar_count", 0))
         LOGGER.info("FINAL BARCODE=%s", result.get("barcode", ""))
         response = _shape_response(result)
+        LOGGER.info("FINAL RESPONSE READY success=%s barcode=%s", response["success"], response.get("barcode", ""))
         return JSONResponse(status_code=200 if response["success"] else 422, content=response)
     except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "barcode": "",
-                "barcode_type": "",
-                "product_title": "",
-                "product_description": "",
-                "expiration_date": None,
-                "expiration_text": None,
-                "expiration_found": False,
-                "images": [],
-                "links": [],
-                "source": "YOLOv8 + ZBar + SerpAPI",
-                "message": f"AI service error: {exc}",
-            },
-        )
+        return _barcode_internal_error(exc)
     finally:
-        await file.close()
-        upload_path.unlink(missing_ok=True)
+        try:
+            await file.close()
+        except Exception:
+            pass
+        if upload_path:
+            upload_path.unlink(missing_ok=True)
 
 
 def _shape_expiration_response(result: dict) -> dict:

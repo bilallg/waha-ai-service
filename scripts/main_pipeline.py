@@ -172,7 +172,13 @@ def _normalize_serpapi_description(
         }
     )
     content["product_title"] = clean_product_title(content.get("product_title", ""), {**lookup, **content})
-    normalized = {**serpapi_result, **content}
+    description_source = content.get("description_source", "OpenAI")
+    normalized = {
+        **serpapi_result,
+        **content,
+        "description_source": description_source,
+        "source": "SerpAPI + OpenAI" if description_source == "OpenAI" else "SerpAPI + clean_fallback",
+    }
     return normalized
 
 
@@ -409,6 +415,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         }
 
     barcode = sanitize_barcode(barcode)
+    LOGGER.info("PRODUCT ENRICHMENT START")
     try:
         serpapi_result = enrich_product_from_barcode(barcode)
     except Exception as exc:
@@ -441,6 +448,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
     if product_lookup.get("source") == "fallback":
         warnings.append("Produit non trouve dans OpenFoodFacts. Une fiche provisoire a ete creee.")
 
+    LOGGER.info("OPENAI DESCRIPTION START")
     serpapi_result = _normalize_serpapi_description(
         serpapi_result=serpapi_result,
         barcode=barcode,
@@ -696,6 +704,7 @@ def run_pipeline(
     ensure_product_dirs(product_dirs, clean=clean)
 
     _notify(progress_callback, "Enrichissement produit via SerpAPI...")
+    LOGGER.info("PRODUCT ENRICHMENT START")
     try:
         serpapi_result = enrich_product_from_barcode(barcode)
     except Exception as exc:
@@ -735,6 +744,7 @@ def run_pipeline(
     _notify(progress_callback, f"Produit detecte: {product_lookup.get('title', product_folder)}")
 
     _notify(progress_callback, "Generation OpenAI du titre et de la description produit...")
+    LOGGER.info("OPENAI DESCRIPTION START")
     serpapi_result = _normalize_serpapi_description(
         serpapi_result=serpapi_result,
         barcode=barcode,
