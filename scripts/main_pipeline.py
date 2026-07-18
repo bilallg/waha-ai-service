@@ -22,6 +22,7 @@ try:
     from .product_lookup import lookup_product
     from .scan_qr_code import scan_code
     from .barcode_decoder import decode_barcode
+    from .openai_product_content import generate_openai_product_content
     from .serpapi_product_search import enrich_product_from_barcode
     from .yolo_barcode_detector import detect_barcodes
 except ImportError:
@@ -34,6 +35,7 @@ except ImportError:
     from product_lookup import lookup_product
     from scan_qr_code import scan_code
     from barcode_decoder import decode_barcode
+    from openai_product_content import generate_openai_product_content
     from serpapi_product_search import enrich_product_from_barcode
     from yolo_barcode_detector import detect_barcodes
 
@@ -150,9 +152,10 @@ def _normalize_serpapi_description(
     serpapi_result: dict[str, Any],
     barcode: str,
     barcode_type: str = "",
+    product_lookup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     original_description = _remove_price_text(str(serpapi_result.get("product_description") or "").strip())
-    clean_description = generate_clean_product_description(
+    fallback_description = generate_clean_product_description(
         barcode=barcode,
         barcode_type=barcode_type,
         product_title=serpapi_result.get("product_title", ""),
@@ -160,7 +163,24 @@ def _normalize_serpapi_description(
         links=serpapi_result.get("links") or [],
         source=serpapi_result.get("source", ""),
     )
-    normalized = {**serpapi_result, "product_description": clean_description}
+    lookup = product_lookup or {}
+    content = generate_openai_product_content(
+        {
+            "barcode": barcode,
+            "barcode_type": barcode_type,
+            "brand": lookup.get("brand", ""),
+            "product_name": lookup.get("title") or lookup.get("product_name", ""),
+            "quantity": lookup.get("quantity", ""),
+            "packaging": lookup.get("packaging", ""),
+            "flavor": lookup.get("flavor", ""),
+            "product_title": serpapi_result.get("product_title", ""),
+            "raw_description": original_description or lookup.get("description", ""),
+            "links": serpapi_result.get("links") or [],
+            "source": serpapi_result.get("source", ""),
+            "description": fallback_description,
+        }
+    )
+    normalized = {**serpapi_result, **content}
     return normalized
 
 
@@ -358,10 +378,28 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         }
     if serpapi_result.get("warning"):
         warnings.append(str(serpapi_result["warning"]))
+
+    try:
+        product_lookup = lookup_product(barcode)
+    except Exception as exc:
+        product_lookup = {
+            "barcode": barcode,
+            "title": f"Produit {barcode}",
+            "brand": "",
+            "description": "",
+            "quantity": "",
+            "image_url": "",
+            "source": "fallback",
+        }
+        warnings.append(f"OpenFoodFacts indisponible: {exc}")
+    if product_lookup.get("source") == "fallback":
+        warnings.append("Produit non trouve dans OpenFoodFacts. Une fiche provisoire a ete creee.")
+
     serpapi_result = _normalize_serpapi_description(
         serpapi_result=serpapi_result,
         barcode=barcode,
         barcode_type=barcode_metadata.get("barcode_type", ""),
+        product_lookup=product_lookup,
     )
     expiration_result = _safe_detect_expiration_date(image_path)
 
@@ -376,6 +414,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         "barcode_type": barcode_metadata.get("barcode_type", ""),
         "warnings": warnings,
         "serpapi_result": serpapi_result,
+        "product_lookup": _seller_managed_product_fields(product_lookup),
         **barcode_metadata,
     }
 
@@ -621,11 +660,6 @@ def run_pipeline(
         }
     if serpapi_result.get("warning"):
         warnings.append(str(serpapi_result["warning"]))
-    serpapi_result = _normalize_serpapi_description(
-        serpapi_result=serpapi_result,
-        barcode=barcode,
-        barcode_type=barcode_metadata.get("barcode_type", ""),
-    )
 
     _notify(progress_callback, "Lecture OCR de la date d'expiration...")
     expiration_result = _safe_detect_expiration_date(input_path)
@@ -648,6 +682,15 @@ def run_pipeline(
     if product_lookup.get("source") == "fallback":
         warnings.append("Produit non trouve dans OpenFoodFacts. Une fiche provisoire a ete creee.")
     _notify(progress_callback, f"Produit detecte: {product_lookup.get('title', product_folder)}")
+
+    _notify(progress_callback, "Generation OpenAI du titre et de la description produit...")
+    serpapi_result = _normalize_serpapi_description(
+        serpapi_result=serpapi_result,
+        barcode=barcode,
+        barcode_type=barcode_metadata.get("barcode_type", ""),
+        product_lookup=product_lookup,
+    )
+
     original_processed = save_original_image(input_path, product_dirs.processed_original)
 
     _notify(progress_callback, "Recherche et telechargement des images web...")
@@ -712,6 +755,8 @@ def run_pipeline(
                 "Active SerpAPI ou verifie que la recherche web trouve des images du produit."
             ),
             "barcode": barcode,
+            "product_title": serpapi_result.get("product_title", ""),
+            "product_description": serpapi_result.get("product_description", ""),
             "product_folder": product_folder,
             "metadata": _seller_managed_product_fields(product_lookup),
             "product_lookup": _seller_managed_product_fields(product_lookup),
@@ -740,11 +785,28 @@ def run_pipeline(
     product_data_path = export_dir / "product_data.json"
     if product_lookup.get("source") == "fallback" and serpapi_result.get("product_title"):
         product_lookup["title"] = serpapi_result["product_title"]
+    elif serpapi_result.get("product_title"):
+        product_lookup["title"] = serpapi_result["product_title"]
     product_lookup["description"] = serpapi_result.get("product_description") or product_lookup.get("description", "")
     product_lookup["links"] = serpapi_result.get("links") or []
     product_lookup["barcode_type"] = barcode_metadata.get("barcode_type", "")
     product_lookup.update(expiration_result)
     product_data = save_product_data(product_lookup, product_data_path)
+    product_data.update(
+        {
+            "title": serpapi_result.get("product_title", product_data.get("title", "")),
+            "product_description": serpapi_result.get("product_description", product_data.get("product_description", "")),
+            "seo_title": serpapi_result.get("product_title", product_data.get("seo_title", "")),
+            "short_description": serpapi_result.get(
+                "product_description",
+                product_data.get("short_description", ""),
+            ),
+            "long_description": serpapi_result.get(
+                "product_description",
+                product_data.get("long_description", ""),
+            ),
+        }
+    )
     product_data.update(
         {
             "barcode_detection_method": barcode_metadata["barcode_detection_method"],
@@ -789,6 +851,8 @@ def run_pipeline(
         "status": "success",
         "message": "Pipeline WAHA IA termine",
         "barcode": barcode,
+        "product_title": serpapi_result.get("product_title", product_data.get("title", "")),
+        "product_description": serpapi_result.get("product_description", product_data.get("product_description", "")),
         "product_folder": product_folder,
         "metadata": _seller_managed_product_fields(product_lookup),
         "product_lookup": _seller_managed_product_fields(product_lookup),

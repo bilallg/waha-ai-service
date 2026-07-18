@@ -113,8 +113,12 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
             "SERPAPI_API_KEY manquante. Le barcode est détecté, mais les informations produit/images web ne peuvent pas être récupérées."
         )
 
-    product_title = serpapi_result.get("product_title") or f"Produit détecté - {barcode}"
-    product_description = serpapi_result.get("product_description") or "Description produit web non disponible."
+    product_title = result.get("product_title") or serpapi_result.get("product_title") or f"Produit détecté - {barcode}"
+    product_description = (
+        result.get("product_description")
+        or serpapi_result.get("product_description")
+        or "Description produit web non disponible."
+    )
     st.text_input("Product title", product_title, disabled=True)
     st.text_area("Product description", product_description, height=130, disabled=True)
     st.caption(f"Source utilisée: {serpapi_result.get('source') or 'SerpAPI'}")
@@ -254,7 +258,7 @@ def process_expiration_input(image_path: str | Path) -> None:
     st.session_state.barcode_scan_result = current_result
 
 
-def render_expiration_scan_section(result: dict[str, Any] | None) -> None:
+def render_expiration_scan_section(result: dict[str, Any] | None, key_prefix: str) -> None:
     if not result or result.get("status") != "success" or not result.get("barcode"):
         return
 
@@ -267,25 +271,35 @@ def render_expiration_scan_section(result: dict[str, Any] | None) -> None:
         uploaded = st.file_uploader(
             "Image contenant la date d'expiration",
             type=IMAGE_TYPES,
-            key="expiration_upload",
+            key=f"{key_prefix}_expiration_upload",
         )
         if uploaded:
             try:
                 saved = save_uploaded_file(uploaded, "expiration_")
                 st.image(str(saved), caption="Expiration image", use_container_width=True)
-                if st.button("Process expiration image", type="primary", use_container_width=True, key="process_expiration_upload"):
+                if st.button(
+                    "Process expiration image",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"{key_prefix}_process_expiration_upload",
+                ):
                     process_expiration_input(saved)
                     st.rerun()
             except Exception as exc:
                 st.error(f"Impossible d'enregistrer l'image de date: {exc}")
 
     with camera_tab:
-        captured = st.camera_input("Capture printed expiration date", key="expiration_camera_input")
+        captured = st.camera_input("Capture printed expiration date", key=f"{key_prefix}_expiration_camera")
         if captured:
             try:
                 saved = save_uploaded_file(captured, "expiration_camera_")
                 st.image(str(saved), caption="Expiration photo", use_container_width=True)
-                if st.button("Process expiration photo", type="primary", use_container_width=True, key="process_expiration_camera"):
+                if st.button(
+                    "Process expiration photo",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"{key_prefix}_process_expiration_camera",
+                ):
                     process_expiration_input(saved)
                     st.rerun()
             except Exception as exc:
@@ -308,6 +322,7 @@ def render_barcode_input_modes() -> None:
                 st.image(str(saved), caption="Image chargée", use_container_width=True)
                 if st.button("Process uploaded image", type="primary", use_container_width=True, key="process_upload_barcode"):
                     process_barcode_input(saved)
+                    st.rerun()
             except Exception as exc:
                 st.error(f"Impossible d'enregistrer l'image: {exc}")
         else:
@@ -323,13 +338,18 @@ def render_barcode_input_modes() -> None:
                 st.image(str(saved), caption="Photo capturée", use_container_width=True)
                 if st.button("Process camera photo", type="primary", use_container_width=True, key="process_camera_barcode"):
                     process_barcode_input(saved)
+                    st.rerun()
             except Exception as exc:
                 st.error(f"Impossible d'enregistrer la photo: {exc}")
 
     result = st.session_state.get("barcode_scan_result")
     render_barcode_result(result)
-    render_expiration_scan_section(result)
-    render_expiration_scan_section(result)
+    if st.session_state.get("pipeline_upload") is not None:
+        render_expiration_scan_section(result, key_prefix="upload_mode")
+    if st.session_state.get("camera_barcode_input") is not None:
+        render_expiration_scan_section(result, key_prefix="camera_mode")
+    if st.session_state.get("pipeline_upload") is None and st.session_state.get("camera_barcode_input") is None:
+        render_expiration_scan_section(result, key_prefix="dashboard")
 
 
 def approval_key(result: dict[str, Any]) -> str:
@@ -530,10 +550,17 @@ def render_marketplace(result: dict[str, Any] | None) -> None:
     st.subheader("Fiche produit générée")
     first, second = st.columns(2)
     with first:
-        st.text_input("Titre SEO", product_data.get("seo_title", ""), disabled=True)
-        st.text_area("Description courte", product_data.get("short_description", ""), disabled=True)
+        st.text_input(
+            "Titre produit",
+            result.get("product_title") or product_data.get("title", ""),
+            disabled=True,
+        )
+        st.text_area(
+            "Description produit",
+            result.get("product_description") or product_data.get("product_description", ""),
+            disabled=True,
+        )
     with second:
-        st.text_area("Description longue", product_data.get("long_description", ""), height=150, disabled=True)
         st.text_area("Tags", ", ".join(product_data.get("tags") or []), disabled=True)
         st.text_area("Mots-clés", ", ".join(product_data.get("seo_keywords") or []), disabled=True)
 
