@@ -3,7 +3,7 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 ultralytics
-Pillow
+pillow
 opencv-python-headless
 pyzbar
 pytesseract

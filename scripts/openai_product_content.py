@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -21,7 +23,7 @@ except ImportError:
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
         return True
 
-load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env")
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
@@ -63,6 +65,10 @@ def _strip_forbidden_text(text: str, barcode: str = "") -> str:
     cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
     return cleaned
+
+
+def _normalize_quantity(text: str) -> str:
+    return re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", text, flags=re.IGNORECASE)
 
 
 def _limit_to_two_sentences(text: str) -> str:
@@ -116,9 +122,9 @@ def _useful_openai_metadata(product_data: dict[str, Any]) -> dict[str, str]:
         "raw_description": raw_description,
     }
     return {
-        key: _strip_forbidden_text(value, barcode)
+        key: _normalize_quantity(_strip_forbidden_text(value, barcode))
         for key, value in metadata.items()
-        if _strip_forbidden_text(value, barcode)
+        if _normalize_quantity(_strip_forbidden_text(value, barcode))
     }
 
 
@@ -146,7 +152,7 @@ def _fallback_content(product_data: dict[str, Any], metadata: dict[str, str]) ->
     return {
         "product_title": product_title,
         "product_description": (
-            f"{product_title} est un produit alimentaire adapté à la vente en magasin, "
+            f"{product_title} est un produit adapté à la vente en magasin, "
             "snack ou point de vente."
         ),
     }
@@ -171,7 +177,8 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     LOGGER.info("OPENAI_API_KEY present: %s", bool(api_key))
     if not api_key:
-        LOGGER.warning("OpenAI generation failed: OPENAI_API_KEY missing")
+        LOGGER.warning("OPENAI DESCRIPTION FAILED: OPENAI_API_KEY missing")
+        LOGGER.info("FINAL DESCRIPTION SOURCE: clean_fallback")
         LOGGER.info("Final product_title: %s", fallback["product_title"])
         LOGGER.info("Final product_description: %s", fallback["product_description"])
         return fallback
@@ -180,7 +187,7 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
     try:
         from openai import OpenAI
 
-        LOGGER.info("Calling OpenAI description generator")
+        LOGGER.info("CALLING OPENAI PRODUCT DESCRIPTION")
         client = OpenAI(api_key=api_key)
         response = client.responses.create(
             model=model,
@@ -216,12 +223,14 @@ def generate_openai_product_content(product_data: dict[str, Any]) -> dict[str, s
         )
         content = json.loads(response.output_text)
         generated = _validate_content(content, product_data)
-        LOGGER.info("OpenAI generation success")
+        LOGGER.info("OPENAI DESCRIPTION SUCCESS")
+        LOGGER.info("FINAL DESCRIPTION SOURCE: OpenAI")
         LOGGER.info("Final product_title: %s", generated["product_title"])
         LOGGER.info("Final product_description: %s", generated["product_description"])
         return generated
     except Exception as exc:
-        LOGGER.warning("OpenAI generation failed: %s", exc, exc_info=True)
+        LOGGER.warning("OPENAI DESCRIPTION FAILED: %s", exc, exc_info=True)
+        LOGGER.info("FINAL DESCRIPTION SOURCE: clean_fallback")
         LOGGER.info("Final product_title: %s", fallback["product_title"])
         LOGGER.info("Final product_description: %s", fallback["product_description"])
         return fallback

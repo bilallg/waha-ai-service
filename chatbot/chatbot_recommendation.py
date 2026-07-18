@@ -19,12 +19,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def find_latest_product_data() -> dict[str, Any]:
-    candidates = sorted(
-        (PROJECT_ROOT / "output" / "exports").glob("product_*/product_data.json"),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-    return _load_json(candidates[0]) if candidates else {}
+    return {}
 
 
 def normalize_product_context(context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -94,7 +89,7 @@ def answer_seller_question(question: str, context: dict[str, Any] | None = None)
             "puis ajuster prix et stock avant publication."
         )
 
-    return "Aucune fiche produit chargee. Lance le pipeline ou genere `output/exports/product_CODEBARRE/product_data.json`."
+    return "Aucune fiche produit chargee. Lance le pipeline pour générer une fiche à jour."
 
 
 def main() -> None:
@@ -102,7 +97,7 @@ def main() -> None:
 
     st.set_page_config(page_title="WAHA Chatbot", layout="wide")
     st.title("WAHA Chatbot vendeur")
-    st.caption("Assistant local base sur la derniere fiche `product_data.json` generee.")
+    st.caption("Assistant local base sur la fiche produit courante du pipeline.")
 
     if "messages" not in st.session_state:
         st.session_state.messages = [

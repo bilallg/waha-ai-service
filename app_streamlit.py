@@ -723,7 +723,7 @@ def render_evaluation() -> None:
 
 
 def render_chatbot(result: dict[str, Any] | None) -> None:
-    st.caption("Le chatbot utilise la fiche product_data.json courante, ou la plus récente si aucun pipeline n'est chargé.")
+    st.caption("Le chatbot utilise uniquement la fiche produit courante du pipeline.")
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = [
             {

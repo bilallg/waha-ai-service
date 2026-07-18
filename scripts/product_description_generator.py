@@ -21,12 +21,13 @@ def _clean_title(title: str, barcode: str = "") -> str:
     if barcode:
         cleaned = re.sub(rf"\b{re.escape(barcode)}\b", "", cleaned)
     cleaned = re.sub(r"(?i)\b(?:EAN\s*13|EAN13|barcode|code[-\s]?barres?)\b", "", cleaned)
+    cleaned = re.sub(r"\b(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|mg)\b", r"\1 \2", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
     return cleaned or "Produit"
 
 
 def _fallback_description(title: str) -> str:
-    return f"{title} est un produit alimentaire adapté à la vente en magasin, snack ou point de vente."
+    return f"{title} est un produit adapté à la vente en magasin, snack ou point de vente."
 
 
 def _slug_words(*values: str) -> list[str]:

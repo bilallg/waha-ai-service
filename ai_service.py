@@ -5,6 +5,7 @@ import secrets
 import shutil
 import sys
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 UPLOADS_DIR = PROJECT_ROOT / "output" / "uploads"
 MODEL_PATH = PROJECT_ROOT / "models" / "barcode_yolov8.pt"
+SERVICE_VERSION = "1.0.1"
+BUILD_TIMESTAMP = os.getenv("RENDER_GIT_COMMIT", "").strip() or datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -108,8 +111,11 @@ def health() -> dict:
         "success": True,
         "status": "healthy",
         "model_available": MODEL_PATH.exists(),
-        "serpapi_configured": bool(SERPAPI_API_KEY),
-        "auth_configured": bool(WAHA_AI_API_KEY),
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+        "serpapi_configured": bool(os.getenv("SERPAPI_API_KEY", "").strip()),
+        "auth_configured": bool(os.getenv("WAHA_AI_API_KEY", "").strip()),
+        "version": SERVICE_VERSION,
+        "build_timestamp": BUILD_TIMESTAMP,
     }
 
 
@@ -125,13 +131,9 @@ async def detect_barcode(
     try:
         with upload_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        LOGGER.info(
-            "Image received endpoint=/ai/barcode/detect filename=%s path=%s size_bytes=%s image_size=%s",
-            file.filename,
-            upload_path,
-            upload_path.stat().st_size if upload_path.exists() else 0,
-            _image_size(upload_path),
-        )
+        image_size = _image_size(upload_path)
+        LOGGER.info("IMAGE RECEIVED endpoint=/ai/barcode/detect filename=%s path=%s size_bytes=%s", file.filename, upload_path, upload_path.stat().st_size if upload_path.exists() else 0)
+        LOGGER.info("IMAGE SIZE=%s", image_size)
 
         result = process_barcode_image(upload_path)
         LOGGER.info(
@@ -141,6 +143,10 @@ async def detect_barcode(
             result.get("pyzbar_decoded_count", 0),
             result.get("barcode", ""),
         )
+        LOGGER.info("FULL IMAGE PYZBAR COUNT=%s", result.get("full_image_pyzbar_count", 0))
+        LOGGER.info("YOLO DETECTIONS COUNT=%s", len(result.get("yolo_boxes") or []))
+        LOGGER.info("CROP PYZBAR COUNT=%s", result.get("crop_pyzbar_count", 0))
+        LOGGER.info("FINAL BARCODE=%s", result.get("barcode", ""))
         response = _shape_response(result)
         return JSONResponse(status_code=200 if response["success"] else 422, content=response)
     except Exception as exc:

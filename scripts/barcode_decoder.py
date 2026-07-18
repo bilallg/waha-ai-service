@@ -115,22 +115,29 @@ def decode_barcode(
     full_image_path: str | Path,
     cropped_image_paths: list[str | Path] | None = None,
     full_image_first: bool = True,
+    retry_full_image_after_crops: bool = True,
 ) -> dict[str, Any]:
     """Decode the complete image and YOLO crops using preprocessing plus rotations."""
     started_at = time.perf_counter()
     errors: list[str] = []
     decoded_count = 0
+    full_image_decoded_count = 0
+    crop_decoded_count = 0
 
     decode_targets: list[tuple[str, str | Path]] = []
     if full_image_first:
         decode_targets.append(("full_image_zbar", full_image_path))
     decode_targets.extend(("yolo_crop_zbar", crop_path) for crop_path in (cropped_image_paths or []))
-    if not full_image_first:
+    if not full_image_first and retry_full_image_after_crops:
         decode_targets.append(("full_image_zbar", full_image_path))
 
     for method, image_path in decode_targets:
         value, barcode_type, error, attempt_decoded_count, variant_method = _decode_path(image_path)
         decoded_count += attempt_decoded_count
+        if method == "full_image_zbar":
+            full_image_decoded_count += attempt_decoded_count
+        else:
+            crop_decoded_count += attempt_decoded_count
         if value:
             return {
                 "barcode_value": value,
@@ -141,6 +148,8 @@ def decode_barcode(
                 "error_message": "",
                 "decoded_image_path": str(image_path),
                 "pyzbar_decoded_count": decoded_count,
+                "full_image_pyzbar_count": full_image_decoded_count,
+                "crop_pyzbar_count": crop_decoded_count,
                 "decode_time_ms": round((time.perf_counter() - started_at) * 1000, 3),
             }
         if error:
@@ -157,6 +166,8 @@ def decode_barcode(
         "error_message": message,
         "decoded_image_path": "",
         "pyzbar_decoded_count": decoded_count,
+        "full_image_pyzbar_count": full_image_decoded_count,
+        "crop_pyzbar_count": crop_decoded_count,
         "decode_time_ms": round((time.perf_counter() - started_at) * 1000, 3),
     }
 

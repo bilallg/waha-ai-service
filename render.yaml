@@ -7,5 +7,9 @@ services:
     envVars:
       - key: SERPAPI_API_KEY
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.5-mini
       - key: WAHA_AI_API_KEY
         sync: false

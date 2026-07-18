@@ -61,6 +61,8 @@ def _empty_barcode_metadata(use_yolo: bool) -> dict[str, Any]:
         "barcode_decode_success": False,
         "barcode_decode_error": "",
         "pyzbar_decoded_count": 0,
+        "full_image_pyzbar_count": 0,
+        "crop_pyzbar_count": 0,
     }
 
 
@@ -289,6 +291,8 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
             "decoding_success": False,
             "error_message": f"Erreur de decodage: {exc}",
             "pyzbar_decoded_count": 0,
+            "full_image_pyzbar_count": 0,
+            "crop_pyzbar_count": 0,
         }
 
     barcode = decoded.get("barcode_value") or ""
@@ -300,13 +304,11 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
             "barcode_decode_success": bool(decoded.get("decoding_success")),
             "barcode_decode_error": decoded.get("error_message", ""),
             "pyzbar_decoded_count": decoded.get("pyzbar_decoded_count", 0),
+            "full_image_pyzbar_count": decoded.get("full_image_pyzbar_count", 0),
+            "crop_pyzbar_count": decoded.get("crop_pyzbar_count", 0),
         }
     )
-    LOGGER.info(
-        "Full-image pyzbar decoded_count=%s barcode_found=%s",
-        barcode_metadata["pyzbar_decoded_count"],
-        bool(barcode),
-    )
+    LOGGER.info("FULL IMAGE PYZBAR COUNT=%s", barcode_metadata["full_image_pyzbar_count"])
 
     detection = {
         "boxes": [],
@@ -319,7 +321,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
     }
     try:
         if not barcode:
-            detection = detect_barcodes(image_path, confidence_threshold=0.15)
+            detection = detect_barcodes(image_path, confidence_threshold=0.10, crop_padding_ratio=0.24)
     except Exception as exc:
         detection["error"] = f"YOLO indisponible: {exc}"
 
@@ -336,7 +338,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
         warnings.append(str(detection["warning"]))
     if detection.get("error"):
         warnings.append(str(detection["error"]))
-    LOGGER.info("YOLO detections count=%s confidence=%s", len(detection.get("boxes") or []), detection.get("confidence", 0.0))
+    LOGGER.info("YOLO DETECTIONS COUNT=%s confidence=%s", len(detection.get("boxes") or []), detection.get("confidence", 0.0))
 
     if not barcode:
         try:
@@ -344,6 +346,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
                 image_path,
                 detection.get("cropped_image_paths", []),
                 full_image_first=False,
+                retry_full_image_after_crops=False,
             )
         except Exception as exc:
             decoded = {
@@ -353,6 +356,8 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
                 "decoding_success": False,
                 "error_message": f"Erreur de decodage: {exc}",
                 "pyzbar_decoded_count": 0,
+                "full_image_pyzbar_count": 0,
+                "crop_pyzbar_count": 0,
             }
 
         barcode = decoded.get("barcode_value") or ""
@@ -365,13 +370,13 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
                 "barcode_decode_error": decoded.get("error_message", ""),
                 "pyzbar_decoded_count": barcode_metadata.get("pyzbar_decoded_count", 0)
                 + decoded.get("pyzbar_decoded_count", 0),
+                "full_image_pyzbar_count": barcode_metadata.get("full_image_pyzbar_count", 0)
+                + decoded.get("full_image_pyzbar_count", 0),
+                "crop_pyzbar_count": barcode_metadata.get("crop_pyzbar_count", 0)
+                + decoded.get("crop_pyzbar_count", 0),
             }
         )
-        LOGGER.info(
-            "Post-YOLO pyzbar decoded_count=%s barcode_found=%s",
-            barcode_metadata["pyzbar_decoded_count"],
-            bool(barcode),
-        )
+        LOGGER.info("CROP PYZBAR COUNT=%s", barcode_metadata["crop_pyzbar_count"])
 
     if not barcode:
         try:
@@ -387,7 +392,7 @@ def process_barcode_image(image_file: Any) -> dict[str, Any]:
                     "barcode_decode_error": "",
                 }
             )
-    LOGGER.info("Final barcode value=%s", barcode or "")
+    LOGGER.info("FINAL BARCODE=%s", barcode or "")
 
     if not barcode:
         if decoded.get("error_message"):
@@ -550,6 +555,8 @@ def run_pipeline(
             "decoding_success": False,
             "error_message": f"Erreur de decodage: {exc}",
             "pyzbar_decoded_count": 0,
+            "full_image_pyzbar_count": 0,
+            "crop_pyzbar_count": 0,
         }
     barcode = decoded.get("barcode_value") or None
     barcode_metadata.update(
@@ -560,13 +567,11 @@ def run_pipeline(
             "barcode_decode_success": bool(decoded.get("decoding_success")),
             "barcode_decode_error": decoded.get("error_message", ""),
             "pyzbar_decoded_count": decoded.get("pyzbar_decoded_count", 0),
+            "full_image_pyzbar_count": decoded.get("full_image_pyzbar_count", 0),
+            "crop_pyzbar_count": decoded.get("crop_pyzbar_count", 0),
         }
     )
-    LOGGER.info(
-        "Pipeline full-image pyzbar decoded_count=%s barcode_found=%s",
-        barcode_metadata["pyzbar_decoded_count"],
-        bool(barcode),
-    )
+    LOGGER.info("FULL IMAGE PYZBAR COUNT=%s", barcode_metadata["full_image_pyzbar_count"])
 
     if use_yolo:
         if barcode:
@@ -585,7 +590,7 @@ def run_pipeline(
                     "error": "",
                 }
                 if barcode
-                else detect_barcodes(input_path, confidence_threshold=0.15)
+                else detect_barcodes(input_path, confidence_threshold=0.10, crop_padding_ratio=0.24)
             )
         except Exception as exc:
             detection = {
@@ -611,7 +616,7 @@ def run_pipeline(
             warnings.append(str(detection["warning"]))
         if detection.get("error"):
             warnings.append(str(detection["error"]))
-        LOGGER.info("Pipeline YOLO detections count=%s confidence=%s", len(detection.get("boxes") or []), detection.get("confidence", 0.0))
+        LOGGER.info("YOLO DETECTIONS COUNT=%s confidence=%s", len(detection.get("boxes") or []), detection.get("confidence", 0.0))
 
         if not barcode:
             _notify(progress_callback, "Decodage ZBar des crops YOLO puis fallback image complete...")
@@ -620,6 +625,7 @@ def run_pipeline(
                     input_path,
                     detection.get("cropped_image_paths", []),
                     full_image_first=False,
+                    retry_full_image_after_crops=False,
                 )
             except Exception as exc:
                 decoded = {
@@ -629,6 +635,8 @@ def run_pipeline(
                     "decoding_success": False,
                     "error_message": f"Erreur de decodage: {exc}",
                     "pyzbar_decoded_count": 0,
+                    "full_image_pyzbar_count": 0,
+                    "crop_pyzbar_count": 0,
                 }
             barcode = decoded.get("barcode_value") or None
             barcode_metadata.update(
@@ -640,13 +648,13 @@ def run_pipeline(
                     "barcode_decode_error": decoded.get("error_message", ""),
                     "pyzbar_decoded_count": barcode_metadata.get("pyzbar_decoded_count", 0)
                     + decoded.get("pyzbar_decoded_count", 0),
+                    "full_image_pyzbar_count": barcode_metadata.get("full_image_pyzbar_count", 0)
+                    + decoded.get("full_image_pyzbar_count", 0),
+                    "crop_pyzbar_count": barcode_metadata.get("crop_pyzbar_count", 0)
+                    + decoded.get("crop_pyzbar_count", 0),
                 }
             )
-            LOGGER.info(
-                "Pipeline post-YOLO pyzbar decoded_count=%s barcode_found=%s",
-                barcode_metadata["pyzbar_decoded_count"],
-                bool(barcode),
-            )
+            LOGGER.info("CROP PYZBAR COUNT=%s", barcode_metadata["crop_pyzbar_count"])
             if decoded.get("error_message") and not barcode:
                 warnings.append(str(decoded["error_message"]))
 
@@ -670,7 +678,7 @@ def run_pipeline(
                     "barcode_decode_error": "",
                 }
             )
-    LOGGER.info("Pipeline final barcode value=%s", barcode or "")
+    LOGGER.info("FINAL BARCODE=%s", barcode or "")
 
     if not barcode:
         return {

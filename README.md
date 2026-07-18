@@ -275,4 +275,4 @@ data/products_history.json
 - Vidéo impossible: les images et exports restent disponibles.
 - Dossier d'export absent: création automatique.
 
-Le chatbot principal utilise directement le `product_data` courant. Lancé séparément avec `streamlit run chatbot/chatbot_recommendation.py`, il charge le dernier `output/exports/product_*/product_data.json`.
+Le chatbot principal utilise uniquement le `product_data` courant transmis par le pipeline actif. Il ne recharge pas les anciens exports comme source de description produit.
