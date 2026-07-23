@@ -195,8 +195,9 @@ Endpoints:
 
 - `GET /health`: vérification sans authentification.
 - `POST /ai/barcode/detect`: analyse une image envoyée en `multipart/form-data`, champ `file`.
+- `POST /ai/stock/predict`: prédit les ventes moyennes, la date de rupture, le niveau de risque et la quantité de réapprovisionnement.
 
-Le endpoint `/ai/barcode/detect` exige le header:
+Les endpoints `/ai/barcode/detect`, `/ai/expiration/detect` et `/ai/stock/predict` exigent le header:
 
 ```text
 X-API-Key: votre_cle_interne_backend
@@ -218,9 +219,25 @@ curl -X POST "http://localhost:8001/ai/barcode/detect" \
 
 La réponse contient le code-barres, son type, le titre produit, la description, les images, les liens et la source `YOLOv8 + ZBar + SerpAPI`.
 
+Exemple de prédiction stock:
+
+```bash
+curl -X POST "http://localhost:8001/ai/stock/predict" \
+  -H "X-API-Key: votre_cle_interne_backend" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "product_id": "5449000014535",
+    "product_title": "Sprite 330 ml",
+    "current_stock": 25,
+    "sales_last_7_days": [5, 3, 4, 6, 2, 5, 4],
+    "lead_time_days": 3,
+    "safety_stock": 5
+  }'
+```
+
 L'interface contient six onglets:
 
-1. **Dashboard**: upload, option YOLO, statut du pipeline et résultat produit.
+1. **Dashboard**: upload, option YOLO, prédiction stock, statut du pipeline et résultat produit.
 2. **YOLO Detection**: annotation, crops, confiance, temps et méthode utilisée.
 3. **Product Marketplace**: OpenFoodFacts, images web/filtrées/finales et validation vendeur.
 4. **Video & Export**: MP4 et téléchargements JSON/CSV/ZIP.

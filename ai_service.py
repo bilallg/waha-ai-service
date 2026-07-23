@@ -37,6 +37,7 @@ LOGGER = logging.getLogger(__name__)
 from expiration_date_ocr import detect_expiration_date
 from main_pipeline import process_barcode_image
 from openai_product_content import clean_product_title
+from stock_prediction import predict_stock_depletion
 
 
 app = FastAPI(
@@ -48,8 +49,13 @@ app = FastAPI(
 
 @app.middleware("http")
 async def reject_unauthorized_ai_requests(request: Request, call_next):
-    if request.url.path in {"/ai/barcode/detect", "/ai/expiration/detect"} and request.method.upper() == "POST":
+    protected_paths = {"/ai/barcode/detect", "/ai/expiration/detect", "/ai/stock/predict"}
+    if request.url.path in protected_paths and request.method.upper() == "POST":
+        if request.url.path == "/ai/stock/predict":
+            LOGGER.info("STOCK PREDICTION REQUEST RECEIVED")
         if not _is_authorized(request.headers.get("X-API-Key")):
+            if request.url.path == "/ai/stock/predict":
+                LOGGER.info("STOCK PREDICTION ERROR: invalid or missing API key")
             return _unauthorized()
     return await call_next(request)
 
@@ -166,9 +172,47 @@ def health() -> dict:
         "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
         "serpapi_configured": bool(os.getenv("SERPAPI_API_KEY", "").strip()),
         "auth_configured": bool(os.getenv("WAHA_AI_API_KEY", "").strip()),
+        "stock_prediction_available": True,
         "version": SERVICE_VERSION,
         "build_timestamp": BUILD_TIMESTAMP,
     }
+
+
+@app.post("/ai/stock/predict", response_model=None)
+async def predict_stock(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    try:
+        if not _is_authorized(x_api_key):
+            return _unauthorized()
+
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            response = {
+                "success": False,
+                "message": f"Invalid input: request body must be valid JSON ({_short_error(exc)})",
+            }
+            LOGGER.info("STOCK PREDICTION ERROR: %s", response["message"])
+            return JSONResponse(status_code=422, content=response)
+
+        response = predict_stock_depletion(payload)
+        if response.get("success"):
+            LOGGER.info("STOCK PREDICTION SUCCESS")
+            return JSONResponse(status_code=200, content=response)
+
+        LOGGER.info("STOCK PREDICTION ERROR: %s", response.get("message", "Invalid input"))
+        return JSONResponse(status_code=422, content=response)
+    except Exception as exc:
+        LOGGER.exception("STOCK PREDICTION ERROR: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Invalid input: unexpected stock prediction error: {_short_error(exc)}",
+            },
+        )
 
 
 @app.post("/ai/barcode/detect", response_model=None)

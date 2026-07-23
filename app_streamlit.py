@@ -48,6 +48,7 @@ from main_pipeline import (
     run_pipeline,
 )
 from scripts.openai_product_content import clean_product_title, generate_openai_product_content
+from stock_prediction import predict_stock_depletion
 
 
 st.set_page_config(page_title="WAHA Platform", page_icon="🛍️", layout="wide")
@@ -561,9 +562,91 @@ def file_download(label: str, path_value: str | None, mime: str) -> None:
         st.button(label, disabled=True, use_container_width=True)
 
 
+def parse_sales_input(value: str) -> list[float]:
+    if not value.strip():
+        return []
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def render_stock_prediction_result(result: dict[str, Any]) -> None:
+    if not result.get("success"):
+        st.error(result.get("message", "Invalid input"))
+        return
+
+    risk_level = result.get("risk_level", "low")
+    risk_label = {"high": "Élevé", "medium": "Moyen", "low": "Faible"}.get(risk_level, risk_level)
+    alert_message = f"{risk_label}: {result.get('message', '')}"
+    if risk_level == "high":
+        st.error(alert_message)
+    elif risk_level == "medium":
+        st.warning(alert_message)
+    else:
+        st.success(alert_message)
+
+    columns = st.columns(3)
+    columns[0].metric("Ventes moyennes / jour", result.get("average_daily_sales", 0))
+    days_until_stockout = result.get("days_until_stockout")
+    estimated_stockout_date = result.get("estimated_stockout_date")
+    columns[1].metric("Jours avant rupture", "-" if days_until_stockout is None else days_until_stockout)
+    columns[2].metric("Date estimée de rupture", estimated_stockout_date or "-")
+
+    columns = st.columns(3)
+    columns[0].metric("Niveau de risque", risk_label)
+    columns[1].metric("Réapprovisionner maintenant", "Oui" if result.get("reorder_now") else "Non")
+    columns[2].metric("Quantité recommandée", result.get("recommended_reorder_quantity", 0))
+
+    with st.expander("JSON prédiction stock"):
+        st.json(result)
+
+
+def render_stock_prediction_section(result: dict[str, Any] | None) -> None:
+    st.divider()
+    st.subheader("Prédiction d’épuisement de stock")
+
+    default_product_id = ""
+    default_product_title = ""
+    if result:
+        default_product_id = result.get("barcode", "") or result.get("product_id", "")
+        default_product_title = result.get("product_title", "")
+
+    with st.form("stock_prediction_form"):
+        product_id = st.text_input("Product id / barcode", value=default_product_id)
+        product_title = st.text_input("Product title", value=default_product_title)
+        current_stock = st.number_input("Current stock", min_value=0.0, value=25.0, step=1.0)
+        sales_last_7_days_text = st.text_input("Sales last 7 days", value="5, 3, 4, 6, 2, 5, 4")
+        lead_time_days = st.number_input("Lead time days", min_value=0.0, value=3.0, step=1.0)
+        safety_stock = st.number_input("Safety stock", min_value=0.0, value=5.0, step=1.0)
+        submitted = st.form_submit_button("Prédire l’épuisement du stock", type="primary", use_container_width=True)
+
+    if submitted:
+        try:
+            sales_last_7_days = parse_sales_input(sales_last_7_days_text)
+            st.session_state.stock_prediction_result = predict_stock_depletion(
+                {
+                    "product_id": product_id,
+                    "product_title": product_title,
+                    "current_stock": current_stock,
+                    "sales_last_7_days": sales_last_7_days,
+                    "lead_time_days": lead_time_days,
+                    "safety_stock": safety_stock,
+                }
+            )
+        except Exception as exc:
+            st.session_state.stock_prediction_result = {
+                "success": False,
+                "message": f"Invalid input: sales_last_7_days must be comma-separated numbers ({exc})",
+            }
+
+    stock_result = st.session_state.get("stock_prediction_result")
+    if stock_result:
+        render_stock_prediction_result(stock_result)
+
+
 def render_dashboard(result: dict[str, Any] | None) -> None:
     st.subheader("Entrée vendeur")
     render_barcode_input_modes()
+
+    render_stock_prediction_section(result or st.session_state.get("barcode_scan_result"))
 
     st.divider()
     st.subheader("Pipeline marketplace complet")
