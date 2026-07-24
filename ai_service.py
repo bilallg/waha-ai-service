@@ -130,6 +130,9 @@ def _resize_large_image(path: str | Path, max_side: int = MAX_UPLOAD_IMAGE_SIDE)
 
 def _shape_response(result: dict) -> dict:
     success = result.get("status") == "success" and bool(result.get("barcode"))
+    serpapi_result = result.get("serpapi_result") or {}
+    images = result.get("images") or serpapi_result.get("images") or []
+    links = result.get("links") or serpapi_result.get("links") or []
     product_title = clean_product_title(
         result.get("product_title", ""),
         {
@@ -156,8 +159,8 @@ def _shape_response(result: dict) -> dict:
         "expiration_date": result.get("expiration_date"),
         "expiration_text": result.get("expiration_text"),
         "expiration_found": bool(result.get("expiration_found")),
-        "images": result.get("images") or [],
-        "links": result.get("links") or [],
+        "images": images,
+        "links": links,
         "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI + OpenAI",
         "message": message,
     }

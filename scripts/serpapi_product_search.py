@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +35,7 @@ SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 REQUEST_TIMEOUT = 15
 RESULT_SOURCE = "SerpAPI"
 UNCERTAIN_WARNING = "Description générée automatiquement à partir des résultats web. À vérifier avant validation."
+LOGGER = logging.getLogger(__name__)
 
 PRODUCT_WORDS = {
     "aliment",
@@ -189,16 +191,31 @@ IMAGE_PRODUCT_HINTS = {
     "330",
     "330ml",
     "330 ml",
+    "33cl",
     "bottle",
     "can",
     "canette",
     "drink",
     "lemon",
+    "lemon lime",
     "lime",
     "ml",
     "pack",
+    "soda",
+    "soft drink",
     "sprite",
 }
+
+SPRITE_IMAGE_ACCEPT_TERMS = (
+    "sprite",
+    "330ml",
+    "330 ml",
+    "33cl",
+    "can",
+    "soft drink",
+    "lemon lime",
+    "soda",
+)
 
 
 def _empty_result(barcode: str, warning: str = "") -> dict[str, Any]:
@@ -420,6 +437,30 @@ def _select_best_result(links: list[dict[str, str]], barcode: str) -> dict[str, 
     return max(indexed_candidates, key=lambda pair: _result_score(pair[1], barcode, pair[0]))[1]
 
 
+def _select_relevant_links(links: list[dict[str, str]], barcode: str, min_links: int = 5, max_links: int = 8) -> list[dict[str, str]]:
+    valid_links = [
+        item
+        for item in links
+        if _is_valid_http_url(_clean_text(item.get("link"))) and _clean_text(item.get("title"))
+    ]
+    if not valid_links:
+        return []
+
+    ranked = [
+        item
+        for index, item in sorted(
+            enumerate(valid_links),
+            key=lambda pair: _result_score(pair[1], barcode, pair[0]),
+            reverse=True,
+        )
+    ]
+    selected = [item for item in ranked if _is_selectable_product_result(item, barcode)]
+    if len(selected) < min_links:
+        selected_links = {item["link"] for item in selected}
+        selected.extend(item for item in ranked if item["link"] not in selected_links)
+    return selected[:max_links]
+
+
 def _build_description(barcode: str, title: str, selected_result: dict[str, str], certain: bool) -> str:
     selected_snippet = _clean_text(selected_result.get("snippet"))
 
@@ -477,13 +518,16 @@ def search_product_info_with_serpapi(barcode: str) -> dict[str, Any]:
             link = _clean_text(item.get("link"))
             title = _clean_title(item.get("title", ""), barcode)
             snippet = _clean_text(item.get("snippet"))
-            if not link or link in seen_links or not title:
+            if not link.startswith(("http://", "https://")) or link in seen_links or not title:
                 continue
             seen_links.add(link)
             links.append({"title": title, "link": link, "snippet": snippet})
 
+    LOGGER.info("SERPAPI LINKS COUNT: %s", len(links))
+
     if not links:
         result["warning"] = warnings[0] if warnings else "Aucun résultat web trouvé via SerpAPI."
+        LOGGER.info("FINAL LINKS COUNT: 0")
         return result
 
     selected_result = _select_best_result(links, barcode)
@@ -495,10 +539,11 @@ def search_product_info_with_serpapi(barcode: str) -> dict[str, Any]:
             "success": True,
             "product_title": title,
             "product_description": _build_description(barcode, title, selected_result, certain),
-            "links": links[:8],
+            "links": _select_relevant_links(links, barcode, min_links=5, max_links=8),
             "warning": "" if certain else UNCERTAIN_WARNING,
         }
     )
+    LOGGER.info("FINAL LINKS COUNT: %s", len(result["links"]))
     return result
 
 
@@ -521,7 +566,7 @@ def search_product_images_with_serpapi(query: str, max_images: int = 6) -> list[
     seen_urls: set[str] = set()
     for item in payload.get("images_results") or []:
         url = _clean_text(item.get("original") or item.get("thumbnail"))
-        if not url or url in seen_urls or not url.startswith(("http://", "https://")):
+        if not _is_valid_http_url(url) or url in seen_urls:
             continue
         seen_urls.add(url)
         candidates.append(
@@ -533,7 +578,15 @@ def search_product_images_with_serpapi(query: str, max_images: int = 6) -> list[
         )
         if len(candidates) >= max(max_images * 4, 12):
             break
+    LOGGER.info("SERPAPI IMAGE CANDIDATES COUNT: %s", len(candidates))
     return _select_best_images(candidates, query, max_images=max_images)
+
+
+def _is_valid_http_url(url: str) -> bool:
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _query_terms(query: str) -> set[str]:
@@ -553,6 +606,11 @@ def _is_clearly_irrelevant_image(image: dict[str, str]) -> bool:
     return any(re.search(pattern, combined, flags=re.IGNORECASE) for pattern in CLEARLY_IRRELEVANT_IMAGE_PATTERNS)
 
 
+def _has_explicit_sprite_image_signal(image: dict[str, str]) -> bool:
+    combined = f"{image.get('title', '')} {image.get('url', '')} {image.get('source', '')}".lower()
+    return any(term in combined for term in SPRITE_IMAGE_ACCEPT_TERMS)
+
+
 def _image_score(image: dict[str, str], query: str, index: int) -> tuple[int, int]:
     combined = f"{image.get('title', '')} {image.get('url', '')}".lower()
     terms = _query_terms(query)
@@ -560,6 +618,8 @@ def _image_score(image: dict[str, str], query: str, index: int) -> tuple[int, in
     score = max(0, 60 - index)
     score += 35 * sum(1 for term in terms if term in combined)
     score += 25 * sum(1 for hint in IMAGE_PRODUCT_HINTS if hint in combined)
+    if _has_explicit_sprite_image_signal(image):
+        score += 120
     if re.search(r"\b\d+\s?(?:ml|cl|g|kg|l)\b", combined):
         score += 30
     if re.search(r"\b(?:can|canette|bottle|bouteille|pack)\b", combined):
@@ -571,21 +631,38 @@ def _image_score(image: dict[str, str], query: str, index: int) -> tuple[int, in
 
 def _select_best_images(images: list[dict[str, str]], query: str, max_images: int = 6) -> list[dict[str, str]]:
     if not images:
+        LOGGER.info("FILTERED IMAGES COUNT: 0")
+        return []
+
+    valid_images = [
+        image
+        for image in images
+        if _is_valid_http_url(_clean_text(image.get("url")))
+    ]
+    if not valid_images:
+        LOGGER.info("FILTERED IMAGES COUNT: 0")
         return []
 
     ranked = [
         image
         for index, image in sorted(
-            enumerate(images),
+            enumerate(valid_images),
             key=lambda pair: _image_score(pair[1], query, pair[0]),
             reverse=True,
         )
     ]
-    relevant = [image for image in ranked if not _is_clearly_irrelevant_image(image)]
+    relevant = [
+        image
+        for image in ranked
+        if not _is_clearly_irrelevant_image(image)
+        or _has_explicit_sprite_image_signal(image)
+    ]
+    LOGGER.info("FILTERED IMAGES COUNT: %s", len(relevant))
 
     # If strict filtering removes everything, keep SerpAPI's best candidates instead of returning [].
-    selected = relevant or ranked[: max(3, max_images)]
-    return selected[:max_images]
+    target_count = min(max_images, 6)
+    selected = relevant or ranked[: max(3, target_count)]
+    return selected[:target_count]
 
 
 def _image_queries(product_info: dict[str, Any], barcode: str) -> list[str]:
@@ -624,24 +701,35 @@ def enrich_product_from_barcode(barcode: str) -> dict[str, Any]:
             try:
                 query_images = search_product_images_with_serpapi(query, max_images=6)
             except Exception as exc:
+                LOGGER.info("SERPAPI IMAGE SEARCH FAILED: %s", exc)
                 warnings.append(str(exc))
                 continue
             for image in query_images:
                 url = image.get("url", "")
-                if not url or url in seen_urls:
+                if not _is_valid_http_url(url) or url in seen_urls:
                     continue
                 seen_urls.add(url)
-                images.append(image)
-            if len(images) >= 3:
+                images.append(
+                    {
+                        "url": url,
+                        "title": _clean_text(image.get("title")) or image_query,
+                        "source": "SerpAPI Google Images",
+                    }
+                )
+            if len(images) >= 6:
                 break
-        images = _select_best_images(images, image_query, max_images=3)
+        LOGGER.info("SERPAPI IMAGE CANDIDATES COUNT: %s", len(images))
+        images = _select_best_images(images, image_query, max_images=6)
         if warnings and not images:
             product_info["warning"] = warnings[0]
     except Exception as exc:
+        LOGGER.info("SERPAPI IMAGE SEARCH FAILED: %s", exc)
         images = []
         product_info["warning"] = str(exc)
 
     product_info["images"] = images
+    LOGGER.info("FINAL IMAGES COUNT: %s", len(images))
+    LOGGER.info("FINAL LINKS COUNT: %s", len(product_info.get("links") or []))
     if not images:
         existing_warning = product_info.get("warning", "")
         fallback_warning = "Aucune image web trouvée. Utilisation de l’image uploadée comme fallback."

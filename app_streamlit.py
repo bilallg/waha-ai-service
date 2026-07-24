@@ -115,6 +115,8 @@ def _product_data_for_openai(result: dict[str, Any], product_title: str, product
 def normalize_product_result(result: dict) -> dict:
     if not result:
         return result
+    original_images = result.get("images") or []
+    original_links = result.get("links") or []
 
     product_title = (
         result.get("product_title")
@@ -194,11 +196,18 @@ def normalize_product_result(result: dict) -> dict:
 
     serpapi_result = result.get("serpapi_result")
     if isinstance(serpapi_result, dict):
+        original_images = original_images or serpapi_result.get("images") or []
+        original_links = original_links or serpapi_result.get("links") or []
         serpapi_result["product_title"] = result.get("product_title", "")
         serpapi_result["product_description"] = result.get("product_description", "")
         serpapi_result["description_source"] = result.get("description_source", "")
+        serpapi_result["images"] = original_images
+        serpapi_result["links"] = original_links
         if result.get("source"):
             serpapi_result["source"] = result.get("source", "")
+
+    result["images"] = original_images
+    result["links"] = original_links
 
     product_data = result.get("product_data")
     if isinstance(product_data, dict):

@@ -154,6 +154,8 @@ def _normalize_serpapi_description(
     barcode_type: str = "",
     product_lookup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    original_images = serpapi_result.get("images") or []
+    original_links = serpapi_result.get("links") or []
     original_description = _remove_price_text(str(serpapi_result.get("product_description") or "").strip())
     lookup = product_lookup or {}
     content = generate_openai_product_content(
@@ -176,6 +178,8 @@ def _normalize_serpapi_description(
     normalized = {
         **serpapi_result,
         **content,
+        "images": original_images,
+        "links": original_links,
         "description_source": description_source,
         "source": "SerpAPI + OpenAI" if description_source == "OpenAI" else "SerpAPI + clean_fallback",
     }
