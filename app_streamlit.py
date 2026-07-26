@@ -229,7 +229,7 @@ def normalize_product_result(result: dict) -> dict:
 
 
 def ensure_streamlit_product_assets(result: dict[str, Any]) -> dict[str, Any]:
-    if not result or result.get("status") != "success" or not result.get("barcode"):
+    if not result or result.get("status") != "success" or not (result.get("barcode") or result.get("product_title")):
         return result
 
     product_title = result.get("product_title", "")
@@ -296,6 +296,8 @@ def show_warnings(result: dict[str, Any]) -> None:
 
 
 def render_serpapi_enrichment(result: dict[str, Any]) -> None:
+    result = ensure_streamlit_product_assets(normalize_product_result(result))
+    st.session_state.pipeline_result = result
     serpapi_result = result.get("serpapi_result") or {}
     barcode = result.get("barcode") or serpapi_result.get("barcode") or ""
     if not barcode:
@@ -310,7 +312,6 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
             "SERPAPI_API_KEY manquante. Le barcode est détecté, mais les informations produit/images web ne peuvent pas être récupérées."
         )
 
-    result = normalize_product_result(result)
     product_title = result.get("product_title", "")
     product_description = result.get("product_description", "")
     st.text_input("Product title", product_title, disabled=True)
@@ -321,8 +322,10 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
     if serpapi_result.get("warning"):
         st.warning(serpapi_result["warning"])
 
-    images = (serpapi_result.get("images") or [])[:6]
+    images = (result.get("images") or serpapi_result.get("images") or [])[:6]
     st.subheader("Images SerpAPI")
+    st.write("Images count:", len(result.get("images", [])))
+    st.write("Image query:", result.get("debug_image_query", ""))
     if images:
         columns = st.columns(3)
         for index, image in enumerate(images):
@@ -370,7 +373,8 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
 def render_barcode_result(result: dict[str, Any] | None) -> None:
     if not result:
         return
-    result = normalize_product_result(result)
+    result = ensure_streamlit_product_assets(normalize_product_result(result))
+    st.session_state.barcode_scan_result = result
 
     payload = barcode_result_payload(result)
     st.subheader("Final Result")
@@ -390,6 +394,8 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
 
     images = payload["images"][:6]
     st.subheader("Images")
+    st.write("Images count:", len(result.get("images", [])))
+    st.write("Image query:", result.get("debug_image_query", ""))
     if images:
         image_columns = st.columns(3)
         for index, image in enumerate(images):
