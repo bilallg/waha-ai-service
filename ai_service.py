@@ -37,6 +37,12 @@ LOGGER = logging.getLogger(__name__)
 from expiration_date_ocr import detect_expiration_date
 from main_pipeline import process_barcode_image
 from openai_product_content import clean_product_title
+from serpapi_product_search import (
+    build_serpapi_image_query,
+    search_images_for_product_title,
+    search_product_links_with_serpapi,
+    serpapi_configured,
+)
 from stock_prediction import predict_stock_depletion
 
 
@@ -128,11 +134,96 @@ def _resize_large_image(path: str | Path, max_side: int = MAX_UPLOAD_IMAGE_SIDE)
         image.save(path, save_format, quality=90, optimize=True)
 
 
+def _valid_response_images(images: object) -> list[dict]:
+    if not isinstance(images, list):
+        return []
+    valid_images: list[dict] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        url = str(image.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        valid_images.append(
+            {
+                "url": url,
+                "title": str(image.get("title") or "").strip(),
+                "source": image.get("source") or "SerpAPI Google Images",
+            }
+        )
+    return valid_images[:6]
+
+
+def _valid_response_links(links: object) -> list[dict]:
+    if not isinstance(links, list):
+        return []
+    valid_links: list[dict] = []
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        url = str(link.get("link") or link.get("url") or "").strip()
+        title = str(link.get("title") or "").strip()
+        if not url.startswith(("http://", "https://")) or not title:
+            continue
+        valid_links.append(
+            {
+                "title": title,
+                "link": url,
+                "snippet": str(link.get("snippet") or "").strip(),
+            }
+        )
+    return valid_links[:8]
+
+
+def _response_assets(result: dict) -> tuple[list[dict], list[dict]]:
+    serpapi_result = result.get("serpapi_result") or {}
+    images = _valid_response_images(result.get("images")) or _valid_response_images(serpapi_result.get("images"))
+    links = _valid_response_links(result.get("links")) or _valid_response_links(serpapi_result.get("links"))
+    return images, links
+
+
+def _enrich_missing_response_assets(result: dict, product_title: str) -> tuple[list[dict], list[dict], str]:
+    barcode = str(result.get("barcode") or "").strip()
+    images, links = _response_assets(result)
+    debug_image_query = build_serpapi_image_query(product_title, barcode)
+
+    LOGGER.info("SERPAPI_CONFIGURED: %s", serpapi_configured())
+
+    if not links and barcode:
+        try:
+            link_query = " ".join(part for part in [barcode, product_title] if part).strip()
+            LOGGER.info("SERPAPI PRODUCT SEARCH START")
+            links = search_product_links_with_serpapi(link_query or barcode, barcode=barcode, max_links=5)
+            LOGGER.info("SERPAPI PRODUCT LINKS COUNT: %s", len(links))
+        except Exception as exc:
+            LOGGER.info("SERPAPI PRODUCT SEARCH FAILED: %s", exc)
+            links = []
+
+    if not images:
+        try:
+            images, debug_image_query = search_images_for_product_title(product_title, barcode=barcode, max_images=6)
+        except Exception as exc:
+            LOGGER.info("SERPAPI IMAGE SEARCH FAILED: %s", exc)
+            images = []
+
+    serpapi_result = result.get("serpapi_result")
+    if isinstance(serpapi_result, dict):
+        if images:
+            serpapi_result["images"] = images
+        if links:
+            serpapi_result["links"] = links
+    if images:
+        result["images"] = images
+    if links:
+        result["links"] = links
+
+    LOGGER.info("FINAL IMAGES COUNT: %s", len(images))
+    LOGGER.info("FINAL LINKS COUNT: %s", len(links))
+    return images, links, debug_image_query
+
+
 def _shape_response(result: dict) -> dict:
     success = result.get("status") == "success" and bool(result.get("barcode"))
-    serpapi_result = result.get("serpapi_result") or {}
-    images = result.get("images") or serpapi_result.get("images") or []
-    links = result.get("links") or serpapi_result.get("links") or []
     product_title = clean_product_title(
         result.get("product_title", ""),
         {
@@ -142,6 +233,11 @@ def _shape_response(result: dict) -> dict:
             "product_title": result.get("product_title", ""),
         },
     )
+    if success:
+        images, links, debug_image_query = _enrich_missing_response_assets(result, product_title)
+    else:
+        images, links = _response_assets(result)
+        debug_image_query = ""
     message = (
         "Barcode detected and enriched."
         if success and result.get("expiration_found")
@@ -163,6 +259,9 @@ def _shape_response(result: dict) -> dict:
         "links": links,
         "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI + OpenAI",
         "message": message,
+        "debug_images_count": len(images),
+        "debug_links_count": len(links),
+        "debug_image_query": debug_image_query,
     }
 
 
@@ -253,6 +352,7 @@ async def detect_barcode(
         LOGGER.info("CROP PYZBAR COUNT=%s", result.get("crop_pyzbar_count", 0))
         LOGGER.info("FINAL BARCODE=%s", result.get("barcode", ""))
         response = _shape_response(result)
+        LOGGER.info("FINAL RESPONSE READY")
         LOGGER.info("FINAL RESPONSE READY success=%s barcode=%s", response["success"], response.get("barcode", ""))
         return JSONResponse(status_code=200 if response["success"] else 422, content=response)
     except Exception as exc:
