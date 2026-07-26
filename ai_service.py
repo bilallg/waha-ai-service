@@ -36,10 +36,11 @@ LOGGER = logging.getLogger(__name__)
 
 from expiration_date_ocr import detect_expiration_date
 from main_pipeline import process_barcode_image
-from openai_product_content import clean_product_title
+from openai_product_content import clean_product_description, clean_product_title
 from serpapi_product_search import (
     build_serpapi_image_query,
     search_images_for_product_title,
+    search_product_images_with_serpapi,
     search_product_links_with_serpapi,
     serpapi_configured,
 )
@@ -182,10 +183,11 @@ def _response_assets(result: dict) -> tuple[list[dict], list[dict]]:
     return images, links
 
 
-def _enrich_missing_response_assets(result: dict, product_title: str) -> tuple[list[dict], list[dict], str]:
+def _enrich_missing_response_assets(result: dict, product_title: str) -> tuple[list[dict], list[dict], str, str]:
     barcode = str(result.get("barcode") or "").strip()
     images, links = _response_assets(result)
-    debug_image_query = build_serpapi_image_query(product_title, barcode)
+    debug_image_query = str(result.get("debug_image_query") or "").strip() or build_serpapi_image_query(product_title, barcode)
+    debug_image_error = str(result.get("debug_image_error") or "").strip()
 
     LOGGER.info("SERPAPI_CONFIGURED: %s", serpapi_configured())
 
@@ -201,9 +203,15 @@ def _enrich_missing_response_assets(result: dict, product_title: str) -> tuple[l
 
     if not images:
         try:
-            images, debug_image_query = search_images_for_product_title(product_title, barcode=barcode, max_images=6)
+            if debug_image_query:
+                images = search_product_images_with_serpapi(debug_image_query, max_images=6)
+            else:
+                images, debug_image_query = search_images_for_product_title(product_title, barcode=barcode, max_images=6)
+            debug_image_error = ""
         except Exception as exc:
+            debug_image_error = str(exc)
             LOGGER.info("SERPAPI IMAGE SEARCH FAILED: %s", exc)
+            LOGGER.info("FINAL IMAGE ERROR: %s", exc)
             images = []
 
     serpapi_result = result.get("serpapi_result")
@@ -219,7 +227,7 @@ def _enrich_missing_response_assets(result: dict, product_title: str) -> tuple[l
 
     LOGGER.info("FINAL IMAGES COUNT: %s", len(images))
     LOGGER.info("FINAL LINKS COUNT: %s", len(links))
-    return images, links, debug_image_query
+    return images, links, debug_image_query, debug_image_error
 
 
 def _shape_response(result: dict) -> dict:
@@ -233,11 +241,26 @@ def _shape_response(result: dict) -> dict:
             "product_title": result.get("product_title", ""),
         },
     )
+    product_data_for_description = {
+        **(result.get("product_lookup") or {}),
+        "barcode": result.get("barcode", ""),
+        "product_title": product_title,
+    }
+    raw_product_description = result.get("product_description", "")
+    product_description = clean_product_description(
+        product_title,
+        raw_product_description,
+        product_data_for_description,
+    )
+    response_source = result.get("source") or "YOLOv8 + ZBar + SerpAPI + OpenAI"
+    if product_description != raw_product_description:
+        response_source = "SerpAPI + clean_fallback"
     if success:
-        images, links, debug_image_query = _enrich_missing_response_assets(result, product_title)
+        images, links, debug_image_query, debug_image_error = _enrich_missing_response_assets(result, product_title)
     else:
         images, links = _response_assets(result)
         debug_image_query = ""
+        debug_image_error = ""
     message = (
         "Barcode detected and enriched."
         if success and result.get("expiration_found")
@@ -251,17 +274,18 @@ def _shape_response(result: dict) -> dict:
         "barcode": result.get("barcode", ""),
         "barcode_type": result.get("barcode_type", ""),
         "product_title": product_title,
-        "product_description": result.get("product_description", ""),
+        "product_description": product_description,
         "expiration_date": result.get("expiration_date"),
         "expiration_text": result.get("expiration_text"),
         "expiration_found": bool(result.get("expiration_found")),
         "images": images,
         "links": links,
-        "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI + OpenAI",
+        "source": response_source,
         "message": message,
         "debug_images_count": len(images),
         "debug_links_count": len(links),
         "debug_image_query": debug_image_query,
+        "debug_image_error": debug_image_error,
     }
 
 

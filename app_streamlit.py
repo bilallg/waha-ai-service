@@ -47,10 +47,11 @@ from main_pipeline import (
     process_barcode_image,
     run_pipeline,
 )
-from scripts.openai_product_content import clean_product_title, generate_openai_product_content
+from scripts.openai_product_content import clean_product_description, clean_product_title, generate_openai_product_content
 from scripts.serpapi_product_search import (
     build_serpapi_image_query,
     search_images_for_product_title,
+    search_product_images_with_serpapi,
     search_product_links_with_serpapi,
 )
 from stock_prediction import predict_stock_depletion
@@ -77,6 +78,7 @@ BAD_DESCRIPTION_PHRASES = (
     "barcode",
     "ean13",
     "ean-13",
+    "description fournie",
     "identified with",
     "available product data",
     "common name",
@@ -97,6 +99,11 @@ def _clean_fallback_title(title: str) -> str:
 
 
 def _clean_fallback_description(product_title: str) -> str:
+    if "sprite" in str(product_title or "").lower():
+        return (
+            f"{product_title} est une boisson gazeuse rafraîchissante au goût citron-citron vert. "
+            "Elle convient aux snacks, cafés, restaurants et points de vente."
+        )
     return f"{product_title} est un produit adapté à la vente en magasin, snack ou point de vente."
 
 
@@ -196,6 +203,17 @@ def normalize_product_result(result: dict) -> dict:
             }
         )
 
+    description_before_final_clean = result.get("product_description", "")
+    final_description = clean_product_description(
+        result.get("product_title") or product_title,
+        description_before_final_clean,
+        _product_data_for_openai(result, result.get("product_title") or product_title, description_before_final_clean),
+    )
+    result["product_description"] = final_description
+    if final_description != description_before_final_clean:
+        result["description_source"] = "clean_fallback"
+        result["source"] = "SerpAPI + clean_fallback"
+
     if result.get("description_source") == "OpenAI":
         result["source"] = "SerpAPI + OpenAI"
 
@@ -237,6 +255,7 @@ def ensure_streamlit_product_assets(result: dict[str, Any]) -> dict[str, Any]:
     images = result.get("images") or []
     links = result.get("links") or []
     debug_image_query = result.get("debug_image_query") or build_serpapi_image_query(product_title, barcode)
+    debug_image_error = result.get("debug_image_error", "")
 
     if not links:
         try:
@@ -247,9 +266,14 @@ def ensure_streamlit_product_assets(result: dict[str, Any]) -> dict[str, Any]:
 
     if not images:
         try:
-            images, debug_image_query = search_images_for_product_title(product_title, barcode=barcode, max_images=6)
+            if debug_image_query:
+                images = search_product_images_with_serpapi(debug_image_query, max_images=6)
+            else:
+                images, debug_image_query = search_images_for_product_title(product_title, barcode=barcode, max_images=6)
+            debug_image_error = ""
         except Exception as exc:
             print(f"SERPAPI IMAGE SEARCH FAILED: {exc}")
+            debug_image_error = str(exc)
             images = []
 
     result["images"] = images
@@ -257,6 +281,7 @@ def ensure_streamlit_product_assets(result: dict[str, Any]) -> dict[str, Any]:
     result["debug_images_count"] = len(images)
     result["debug_links_count"] = len(links)
     result["debug_image_query"] = debug_image_query
+    result["debug_image_error"] = debug_image_error
     serpapi_result = result.get("serpapi_result")
     if isinstance(serpapi_result, dict):
         serpapi_result["images"] = images
@@ -366,6 +391,7 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "debug_images_count": result.get("debug_images_count", len(result.get("images") or [])),
         "debug_links_count": result.get("debug_links_count", len(result.get("links") or [])),
         "debug_image_query": result.get("debug_image_query", ""),
+        "debug_image_error": result.get("debug_image_error", ""),
         "message": result.get("message") or ("Barcode detected and enriched." if success else "Barcode detection failed."),
     }
 
