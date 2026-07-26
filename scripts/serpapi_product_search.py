@@ -734,7 +734,7 @@ def _select_best_images(images: list[dict[str, str]], query: str, max_images: in
 def build_serpapi_image_query(product_title: str, barcode: str = "") -> str:
     cleaned_title = _clean_text(product_title)
     if str(barcode).strip() == "5449000014535" or "sprite" in cleaned_title.lower():
-        return "Sprite Lemon-Lime 330 ml can"
+        return "Sprite 330 ml can"
     return f"{cleaned_title} product image" if cleaned_title else f"{barcode} product image"
 
 

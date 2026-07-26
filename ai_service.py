@@ -371,7 +371,7 @@ def _shape_expiration_response(result: dict) -> dict:
     return {
         "success": True,
         "expiration_date": result.get("expiration_date"),
-        "expiration_text": result.get("expiration_text") if found else None,
+        "expiration_text": result.get("expiration_text"),
         "expiration_found": found,
         "message": "Expiration date detected" if found else "Expiration date not detected",
     }

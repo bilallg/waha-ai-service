@@ -32,11 +32,11 @@ DATE_PATTERNS = [
 ]
 
 
-def _not_detected() -> dict[str, Any]:
+def _not_detected(expiration_text: str | None = None, confidence: float | None = None) -> dict[str, Any]:
     return {
         "expiration_date": None,
-        "expiration_text": None,
-        "expiration_confidence": None,
+        "expiration_text": expiration_text,
+        "expiration_confidence": confidence,
         "expiration_found": False,
         "message": NOT_DETECTED_MESSAGE,
     }
@@ -46,6 +46,12 @@ def _normalize_text(text: str) -> str:
     normalized = text.replace("\n", " ")
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized.strip()
+
+
+def _remove_barcode_numbers(text: str) -> str:
+    cleaned = re.sub(r"\b\d{8,}\b", " ", text)
+    cleaned = re.sub(r"\b(?:\d\s*){8,}\b", " ", cleaned)
+    return _normalize_text(cleaned)
 
 
 def _parse_confidence(value: object) -> float | None:
@@ -108,7 +114,7 @@ def _match_expiration_date(text: str) -> tuple[str | None, str]:
     if not normalized_text:
         return None, ""
 
-    normalized_text = re.sub(r"\b\d{8,}\b", " ", normalized_text)
+    normalized_text = _remove_barcode_numbers(normalized_text)
     for pattern in DATE_PATTERNS:
         for match in pattern.finditer(normalized_text):
             raw_date = match.group("date")
@@ -195,12 +201,22 @@ def detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
     except Exception:
         return _not_detected()
 
+    best_text = ""
+    best_confidence: float | None = None
     try:
         for image in variants:
             for psm in (6, 7, 11, 12):
                 text, confidence = _ocr_image(image, page_segmentation_mode=psm)
+                sanitized_text = _remove_barcode_numbers(text)
+                if sanitized_text and (
+                    best_confidence is None
+                    or confidence is None
+                    or confidence >= best_confidence
+                ):
+                    best_text = sanitized_text
+                    best_confidence = confidence
 
-                expiration_date, expiration_text = _match_expiration_date(text)
+                expiration_date, expiration_text = _match_expiration_date(sanitized_text)
                 if not expiration_date:
                     continue
                 if confidence is not None and confidence < MIN_OCR_CONFIDENCE:
@@ -214,9 +230,9 @@ def detect_expiration_date(image_path: str | Path) -> dict[str, Any]:
                     "message": "Expiration date detected",
                 }
     except Exception:
-        return _not_detected()
+        return _not_detected(best_text or None, best_confidence)
 
-    return _not_detected()
+    return _not_detected(best_text or None, best_confidence)
 
 
 if __name__ == "__main__":

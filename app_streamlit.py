@@ -48,6 +48,11 @@ from main_pipeline import (
     run_pipeline,
 )
 from scripts.openai_product_content import clean_product_title, generate_openai_product_content
+from scripts.serpapi_product_search import (
+    build_serpapi_image_query,
+    search_images_for_product_title,
+    search_product_links_with_serpapi,
+)
 from stock_prediction import predict_stock_depletion
 
 
@@ -223,6 +228,42 @@ def normalize_product_result(result: dict) -> dict:
     return result
 
 
+def ensure_streamlit_product_assets(result: dict[str, Any]) -> dict[str, Any]:
+    if not result or result.get("status") != "success" or not result.get("barcode"):
+        return result
+
+    product_title = result.get("product_title", "")
+    barcode = result.get("barcode", "")
+    images = result.get("images") or []
+    links = result.get("links") or []
+    debug_image_query = result.get("debug_image_query") or build_serpapi_image_query(product_title, barcode)
+
+    if not links:
+        try:
+            links = search_product_links_with_serpapi(f"{barcode} {product_title}".strip(), barcode=barcode, max_links=5)
+        except Exception as exc:
+            print(f"SERPAPI PRODUCT SEARCH FAILED: {exc}")
+            links = []
+
+    if not images:
+        try:
+            images, debug_image_query = search_images_for_product_title(product_title, barcode=barcode, max_images=6)
+        except Exception as exc:
+            print(f"SERPAPI IMAGE SEARCH FAILED: {exc}")
+            images = []
+
+    result["images"] = images
+    result["links"] = links
+    result["debug_images_count"] = len(images)
+    result["debug_links_count"] = len(links)
+    result["debug_image_query"] = debug_image_query
+    serpapi_result = result.get("serpapi_result")
+    if isinstance(serpapi_result, dict):
+        serpapi_result["images"] = images
+        serpapi_result["links"] = links
+    return result
+
+
 def save_uploaded_file(uploaded_file: Any, prefix: str = "") -> Path:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     raw_name = Path(getattr(uploaded_file, "name", "barcode_upload.jpg")).name
@@ -286,10 +327,12 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
         columns = st.columns(3)
         for index, image in enumerate(images):
             with columns[index % 3]:
-                caption = image.get("title") or image.get("source") or "SerpAPI Google Images"
-                st.image(image.get("url"), caption=caption, use_container_width=True)
+                st.image(image.get("url"), use_container_width=True)
+                st.caption(image.get("title") or "Product image")
+                if image.get("source"):
+                    st.caption(f"Source: {image['source']}")
     else:
-        st.info("Aucune image web trouvée. Utilisation de l’image uploadée comme fallback.")
+        st.warning("Aucune image trouvée. Vérifiez SerpAPI ou le filtrage des images.")
 
     links = serpapi_result.get("links") or []
     st.subheader("Liens trouvés via SerpAPI")
@@ -317,6 +360,9 @@ def barcode_result_payload(result: dict[str, Any]) -> dict[str, Any]:
         "links": result.get("links") or [],
         "source": result.get("source") or "YOLOv8 + ZBar + SerpAPI",
         "description_source": result.get("description_source", "unknown"),
+        "debug_images_count": result.get("debug_images_count", len(result.get("images") or [])),
+        "debug_links_count": result.get("debug_links_count", len(result.get("links") or [])),
+        "debug_image_query": result.get("debug_image_query", ""),
         "message": result.get("message") or ("Barcode detected and enriched." if success else "Barcode detection failed."),
     }
 
@@ -338,29 +384,25 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
     columns[1].metric("Barcode Type", payload["barcode_type"] or "-")
     columns[2].metric("Source", payload["source"] or "-")
 
-    st.subheader("Expiration Date")
-    if payload["expiration_found"]:
-        st.success(f"Expiration date detected: {payload['expiration_date']}")
-        if payload["expiration_text"]:
-            st.caption(f"OCR text: {payload['expiration_text']}")
-    else:
-        st.warning("Expiration date not detected. Please take a clearer image of the printed date.")
-
     st.text_input("Product title", payload["product_title"], disabled=True, key="scan_product_title")
     st.text_area("Product description", payload["product_description"], height=120, disabled=True, key="scan_product_description")
     st.caption(f"Description source: {payload.get('description_source', 'unknown')}")
 
     images = payload["images"][:6]
+    st.subheader("Images")
     if images:
-        st.subheader("Images")
         image_columns = st.columns(3)
         for index, image in enumerate(images):
             with image_columns[index % 3]:
                 st.image(
                     image.get("url"),
-                    caption=image.get("title") or image.get("source") or "Product image",
                     use_container_width=True,
                 )
+                st.caption(image.get("title") or "Product image")
+                if image.get("source"):
+                    st.caption(f"Source: {image['source']}")
+    else:
+        st.warning("Aucune image trouvée. Vérifiez SerpAPI ou le filtrage des images.")
 
     if payload["links"]:
         st.subheader("Links")
@@ -374,7 +416,9 @@ def process_barcode_input(image_path: str | Path) -> None:
     with st.spinner("Processing barcode..."):
         try:
             print("STREAMLIT PIPELINE START")
-            st.session_state.barcode_scan_result = normalize_product_result(process_barcode_image(image_path))
+            st.session_state.barcode_scan_result = ensure_streamlit_product_assets(
+                normalize_product_result(process_barcode_image(image_path))
+            )
         except Exception as exc:
             st.session_state.barcode_scan_result = {
                 "status": "error",
@@ -397,33 +441,47 @@ def process_expiration_input(image_path: str | Path) -> None:
     with st.spinner("Processing expiration date..."):
         try:
             expiration_result = detect_expiration_date(image_path)
-        except Exception:
+        except Exception as exc:
             expiration_result = {
                 "expiration_date": None,
                 "expiration_text": None,
                 "expiration_found": False,
-                "message": "Expiration date not detected",
+                "message": f"Expiration date not detected: {exc}",
             }
 
+    st.session_state.expiration_scan_result = expiration_result
     current_result = dict(st.session_state.get("barcode_scan_result") or {})
     current_result.update(
         {
             "expiration_date": expiration_result.get("expiration_date"),
-            "expiration_text": expiration_result.get("expiration_text") if expiration_result.get("expiration_found") else None,
+            "expiration_text": expiration_result.get("expiration_text"),
             "expiration_found": bool(expiration_result.get("expiration_found")),
         }
     )
-    st.session_state.barcode_scan_result = current_result
+    if current_result:
+        st.session_state.barcode_scan_result = current_result
 
 
-def render_expiration_scan_section(result: dict[str, Any] | None, key_prefix: str) -> None:
-    if not result or result.get("status") != "success" or not result.get("barcode"):
+def render_expiration_scan_result(result: dict[str, Any] | None) -> None:
+    if not result:
         return
+    found = bool(result.get("expiration_found"))
+    if found:
+        st.success(result.get("message") or "Expiration date detected")
+    else:
+        st.warning("Date d’expiration non détectée. Prenez une image plus proche et plus nette de la date imprimée.")
 
+    columns = st.columns(3)
+    columns[0].metric("expiration_date", result.get("expiration_date") or "-")
+    columns[1].metric("expiration_found", str(found))
+    columns[2].metric("Confidence", result.get("expiration_confidence") if result.get("expiration_confidence") is not None else "-")
+    st.text_area("expiration_text", result.get("expiration_text") or "", height=90, disabled=True)
+
+
+def render_expiration_scan_section(key_prefix: str) -> None:
     st.divider()
-    st.subheader("Scan expiration date")
-    st.caption("Use this when the printed expiration date is on another part of the packaging.")
-    upload_tab, camera_tab = st.tabs(["Upload expiration image", "Camera expiration scan"])
+    st.subheader("Scan / Upload expiration date")
+    upload_tab, camera_tab = st.tabs(["Upload image containing expiration date", "Camera image containing expiration date"])
 
     with upload_tab:
         uploaded = st.file_uploader(
@@ -462,6 +520,8 @@ def render_expiration_scan_section(result: dict[str, Any] | None, key_prefix: st
                     st.rerun()
             except Exception as exc:
                 st.error(f"Impossible d'enregistrer la photo de date: {exc}")
+
+    render_expiration_scan_result(st.session_state.get("expiration_scan_result"))
 
 
 def render_barcode_input_modes() -> None:
@@ -502,12 +562,7 @@ def render_barcode_input_modes() -> None:
 
     result = st.session_state.get("barcode_scan_result")
     render_barcode_result(result)
-    if st.session_state.get("pipeline_upload") is not None:
-        render_expiration_scan_section(result, key_prefix="upload_mode")
-    if st.session_state.get("camera_barcode_input") is not None:
-        render_expiration_scan_section(result, key_prefix="camera_mode")
-    if st.session_state.get("pipeline_upload") is None and st.session_state.get("camera_barcode_input") is None:
-        render_expiration_scan_section(result, key_prefix="dashboard")
+    render_expiration_scan_section(key_prefix="expiration")
 
 
 def approval_key(result: dict[str, Any]) -> str:
