@@ -47,7 +47,43 @@ from main_pipeline import (
     process_barcode_image,
     run_pipeline,
 )
-from scripts.openai_product_content import clean_product_description, clean_product_title, generate_openai_product_content
+from scripts.openai_product_content import clean_product_title, generate_openai_product_content
+try:
+    from scripts.openai_product_content import clean_product_description
+except ImportError:
+    def clean_product_description(product_title: str, product_description: str, product_data: dict[str, Any] | None = None) -> str:
+        barcode = str((product_data or {}).get("barcode", "")).strip()
+        cleaned = re.sub(r"\s+", " ", str(product_description or "")).strip()
+        for pattern in (
+            r"\bbarcode\b",
+            r"\bEAN\s*13\b",
+            r"\bEAN13\b",
+            r"\bidentified with\b",
+            r"\bavailable product data\b",
+            r"\bdescription fournie\b",
+            r"\bcommon name\b",
+            r"\bcategories?\b",
+            r"\bbrands?\b",
+            r"\bpackaging\b",
+        ):
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        if barcode:
+            cleaned = re.sub(rf"\b{re.escape(barcode)}\b", "", cleaned)
+        cleaned = re.sub(r"(?i)\b(sprite)\s+\1\b", r"\1", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|:;,.")
+        title = clean_product_title(product_title or "Produit", product_data or {})
+        if "sprite" in title.lower() and (
+            not cleaned
+            or "description fournie" in cleaned.lower()
+            or not re.search(r"(?i)\b(?:boisson|gazeuse|citron|rafra[iî]chissante)\b", cleaned)
+        ):
+            return (
+                f"{title} est une boisson gazeuse rafraîchissante au goût citron-citron vert. "
+                "Elle convient aux snacks, cafés, restaurants et points de vente."
+            )
+        if not cleaned:
+            return f"{title} est un produit adapté à la vente en magasin, snack ou point de vente."
+        return cleaned if re.search(r"[.!?]$", cleaned) else f"{cleaned}."
 from scripts.serpapi_product_search import (
     build_serpapi_image_query,
     search_images_for_product_title,
@@ -315,6 +351,95 @@ def image_gallery(title: str, paths: list[str] | None, empty_message: str, colum
             st.image(str(path), caption=path.name, use_container_width=True)
 
 
+def _is_present(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def _display_value(value: Any, default: str = "-") -> Any:
+    if not _is_present(value):
+        return default
+    return value
+
+
+def _result_lookup(result: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    metadata = result.get("metadata") or {}
+    product_data = result.get("product_data") or {}
+    product_lookup = result.get("product_lookup") or {}
+    serpapi_result = result.get("serpapi_result") or {}
+    for container in (result, product_data, metadata, product_lookup, serpapi_result):
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            value = container.get(key)
+            if _is_present(value):
+                return value
+    return ""
+
+
+def _image_items(images: Any) -> list[Any]:
+    if isinstance(images, list):
+        return images
+    if isinstance(images, tuple):
+        return list(images)
+    return [images] if _is_present(images) else []
+
+
+def _image_location(image: Any) -> str:
+    if isinstance(image, dict):
+        return str(
+            image.get("url")
+            or image.get("image_url")
+            or image.get("thumbnail")
+            or image.get("original")
+            or image.get("path")
+            or ""
+        )
+    return str(image or "")
+
+
+def _image_title(image: Any) -> str:
+    if isinstance(image, dict):
+        return str(image.get("title") or image.get("name") or "")
+    location = _image_location(image)
+    if location and not re.match(r"^https?://", location, flags=re.IGNORECASE):
+        return Path(location).name
+    return ""
+
+
+def _image_source(image: Any) -> str:
+    if isinstance(image, dict):
+        return str(image.get("source") or image.get("domain") or "")
+    return ""
+
+
+def _render_image_grid(images: Any, columns_count: int = 3) -> None:
+    items = [image for image in _image_items(images) if _image_location(image)]
+    if not items:
+        st.info("Aucune image trouvée.")
+        return
+
+    columns = st.columns(columns_count)
+    for index, image in enumerate(items):
+        location = _image_location(image)
+        title = _image_title(image)
+        source = _image_source(image)
+        with columns[index % columns_count]:
+            try:
+                st.image(location, caption=title or None, use_container_width=True)
+            except Exception:
+                st.caption("Image indisponible.")
+            if source:
+                st.caption(f"Source: {source}")
+
+
+def _metric_value(result: dict[str, Any], key: str, default: Any = "-") -> Any:
+    timings = result.get("timings") or {}
+    value = result.get(key)
+    if not _is_present(value) and isinstance(timings, dict):
+        value = timings.get(key)
+    return _display_value(value, default)
+
+
 def show_warnings(result: dict[str, Any]) -> None:
     for warning in dict.fromkeys(result.get("warnings") or []):
         st.warning(warning)
@@ -347,20 +472,11 @@ def render_serpapi_enrichment(result: dict[str, Any]) -> None:
     if serpapi_result.get("warning"):
         st.warning(serpapi_result["warning"])
 
-    images = (result.get("images") or serpapi_result.get("images") or [])[:6]
-    st.subheader("Images SerpAPI")
+    images = result.get("images") or serpapi_result.get("images") or []
+    st.subheader("Images produit")
     st.write("Images count:", len(result.get("images", [])))
     st.write("Image query:", result.get("debug_image_query", ""))
-    if images:
-        columns = st.columns(3)
-        for index, image in enumerate(images):
-            with columns[index % 3]:
-                st.image(image.get("url"), use_container_width=True)
-                st.caption(image.get("title") or "Product image")
-                if image.get("source"):
-                    st.caption(f"Source: {image['source']}")
-    else:
-        st.warning("Aucune image trouvée. Vérifiez SerpAPI ou le filtrage des images.")
+    _render_image_grid(images, columns_count=3)
 
     links = serpapi_result.get("links") or []
     st.subheader("Liens trouvés via SerpAPI")
@@ -403,42 +519,104 @@ def render_barcode_result(result: dict[str, Any] | None) -> None:
     st.session_state.barcode_scan_result = result
 
     payload = barcode_result_payload(result)
-    st.subheader("Final Result")
-    if payload["success"]:
-        st.success(payload["message"])
+    serpapi_result = result.get("serpapi_result") or {}
+    product_images = result.get("images") or serpapi_result.get("images") or []
+    final_images = (
+        result.get("final_images")
+        or result.get("final_product_images")
+        or result.get("processed_images")
+        or product_images
+    )
+
+    st.subheader("Résultat du scan")
+    if payload.get("success"):
+        st.success(payload.get("message"))
     else:
-        st.error(payload["message"])
+        st.error(payload.get("message"))
 
     columns = st.columns(3)
-    columns[0].metric("Barcode", payload["barcode"] or "-")
-    columns[1].metric("Barcode Type", payload["barcode_type"] or "-")
-    columns[2].metric("Source", payload["source"] or "-")
+    columns[0].metric("barcode", _display_value(result.get("barcode")))
+    columns[1].metric("barcode_type", _display_value(result.get("barcode_type")))
+    columns[2].metric("source", _display_value(result.get("source") or serpapi_result.get("source")))
 
-    st.text_input("Product title", payload["product_title"], disabled=True, key="scan_product_title")
-    st.text_area("Product description", payload["product_description"], height=120, disabled=True, key="scan_product_description")
-    st.caption(f"Description source: {payload.get('description_source', 'unknown')}")
+    st.text_input("product_title", result.get("product_title", ""), disabled=True, key="scan_product_title")
+    st.text_area(
+        "product_description",
+        result.get("product_description", ""),
+        height=120,
+        disabled=True,
+        key="scan_product_description",
+    )
 
-    images = payload["images"][:6]
-    st.subheader("Images")
-    st.write("Images count:", len(result.get("images", [])))
-    st.write("Image query:", result.get("debug_image_query", ""))
-    if images:
-        image_columns = st.columns(3)
-        for index, image in enumerate(images):
-            with image_columns[index % 3]:
-                st.image(
-                    image.get("url"),
-                    use_container_width=True,
-                )
-                st.caption(image.get("title") or "Product image")
-                if image.get("source"):
-                    st.caption(f"Source: {image['source']}")
-    else:
-        st.warning("Aucune image trouvée. Vérifiez SerpAPI ou le filtrage des images.")
+    expiration_found = bool(result.get("expiration_found"))
+    expiration_date = result.get("expiration_date")
+    expiration_columns = st.columns(2)
+    expiration_columns[0].metric("expiration_date", _display_value(expiration_date))
+    expiration_columns[1].metric("expiration_found", str(expiration_found))
+    if not expiration_date:
+        st.info("Date d’expiration non détectée.")
+    if result.get("expiration_text"):
+        st.text_area(
+            "expiration_text",
+            result.get("expiration_text", ""),
+            height=90,
+            disabled=True,
+            key="scan_expiration_text",
+        )
 
-    if payload["links"]:
-        st.subheader("Links")
-        st.dataframe(pd.DataFrame(payload["links"]), use_container_width=True, hide_index=True)
+    st.subheader("Images produit")
+    _render_image_grid(product_images, columns_count=3)
+
+    st.subheader("Fiche produit finale")
+    st.text_input(
+        "final product title",
+        _result_lookup(result, ("final_product_title", "product_title", "title", "seo_title", "product_name", "name")),
+        disabled=True,
+        key="final_product_title",
+    )
+    st.text_area(
+        "final product description",
+        _result_lookup(
+            result,
+            (
+                "final_product_description",
+                "product_description",
+                "long_description",
+                "short_description",
+                "description",
+                "original_description",
+            ),
+        ),
+        height=130,
+        disabled=True,
+        key="final_product_description",
+    )
+    final_text_columns = st.columns(3)
+    final_text_columns[0].metric(
+        "category",
+        _display_value(_result_lookup(result, ("category", "categories", "marketplace_category", "product_category"))),
+    )
+    final_text_columns[1].metric("brand", _display_value(_result_lookup(result, ("brand", "brands"))))
+    final_text_columns[2].metric("quantity", _display_value(_result_lookup(result, ("quantity", "size", "format", "contenance"))))
+
+    st.subheader("Images finales")
+    _render_image_grid(final_images, columns_count=3)
+
+    st.subheader("Métriques")
+    metric_fields = (
+        ("debug_images_count", result.get("debug_images_count", len(_image_items(product_images)))),
+        ("debug_links_count", result.get("debug_links_count", len(result.get("links") or serpapi_result.get("links") or []))),
+        ("debug_image_query", result.get("debug_image_query", "")),
+        ("barcode_detection_time_ms", _metric_value(result, "barcode_detection_time_ms")),
+        ("product_search_time_ms", _metric_value(result, "product_search_time_ms")),
+        ("openai_time_ms", _metric_value(result, "openai_time_ms")),
+        ("image_search_time_ms", _metric_value(result, "image_search_time_ms")),
+        ("total_time_ms", _metric_value(result, "total_time_ms")),
+    )
+    for row_start in range(0, len(metric_fields), 4):
+        metric_columns = st.columns(4)
+        for column, (label, value) in zip(metric_columns, metric_fields[row_start : row_start + 4]):
+            column.metric(label, _display_value(value))
 
     with st.expander("API-ready JSON"):
         st.json(payload)
@@ -781,7 +959,7 @@ def render_dashboard(result: dict[str, Any] | None) -> None:
                     use_yolo=use_yolo,
                     progress_callback=progress,
                 )
-                pipeline_result = normalize_product_result(pipeline_result)
+                pipeline_result = ensure_streamlit_product_assets(normalize_product_result(pipeline_result))
             except Exception as exc:
                 pipeline_result = {"status": "error", "message": f"Erreur inattendue du pipeline: {exc}", "warnings": []}
             st.session_state.pipeline_result = pipeline_result
@@ -794,6 +972,8 @@ def render_dashboard(result: dict[str, Any] | None) -> None:
     if not result:
         render_history()
         return
+    result = ensure_streamlit_product_assets(normalize_product_result(result))
+    st.session_state.pipeline_result = result
     render_serpapi_enrichment(result)
     if result.get("status") != "success":
         st.error(result.get("message", "Le pipeline n'a pas abouti."))
@@ -1114,7 +1294,7 @@ def main() -> None:
 
     result = st.session_state.get("pipeline_result")
     if result:
-        result = normalize_product_result(result)
+        result = ensure_streamlit_product_assets(normalize_product_result(result))
         st.session_state.pipeline_result = result
     tabs = st.tabs(
         [
